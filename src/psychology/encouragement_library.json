@@ -1,0 +1,53 @@
+{
+  "encouragement": [
+    {"text": "这一步确实有点绕，试试先把左下角的卡扣对齐，会顺畅很多！", "difficulty": "medium", "id": 1},
+    {"text": "你已经完成68%的颗粒，超过同期53%的玩家！加油！", "difficulty": "easy", "id": 2},
+    {"text": "大神也会在这一步卡住，你不是一个人在战斗！", "difficulty": "hard", "id": 3},
+    {"text": "换个角度看看，也许从底部往上搭会更直观哦。", "difficulty": "medium", "id": 4},
+    {"text": "说明书这一步确实画得不太清楚，我来帮你拆解一下。", "difficulty": "medium", "id": 5},
+    {"text": "拼乐高就像写代码，有时候需要停下来喝口水，回来就通了。", "difficulty": "easy", "id": 6},
+    {"text": "你已经攻克了最难的第三部分，剩下的都是重复劳动！", "difficulty": "hard", "id": 7},
+    {"text": "试试把零件按颜色分好类，拼起来会更快。", "difficulty": "easy", "id": 8},
+    {"text": "这一步的机关设计很巧妙，拼好之后会动哦，期待吗？", "difficulty": "medium", "id": 9},
+    {"text": "拼错是正常的，我帮你看看哪里需要调整。", "difficulty": "easy", "id": 10},
+    {"text": "这一步需要耐心，慢慢来，比较快。", "difficulty": "medium", "id": 11},
+    {"text": "你离成功就差一步了，坚持住！", "difficulty": "hard", "id": 12},
+    {"text": "拼乐高最爽的那一刻，就是卡扣'咔哒'归位的声音。", "difficulty": "easy", "id": 13},
+    {"text": "这一步很多人都装反了，你不是一个人！", "difficulty": "medium", "id": 14},
+    {"text": "休息一下眼睛，回来你会发现新思路。", "difficulty": "easy", "id": 15}
+  ],
+  "tips": [
+    {"step_hint": "先把所有 2x4 砖挑出来放一边，用的时候不用翻。", "difficulty": "easy", "id": 1},
+    {"step_hint": "这步的卡扣是斜着按下去的，别用蛮力。", "difficulty": "medium", "id": 2},
+    {"step_hint": "如果零件装不进去，检查一下是不是方向反了。", "difficulty": "medium", "id": 3},
+    {"step_hint": "这步可以先不装最后两颗砖，方便后面调整。", "difficulty": "hard", "id": 4},
+    {"step_hint": "说明书上的箭头方向很重要，别忽略。", "difficulty": "easy", "id": 5},
+    {"step_hint": "用橡皮擦可以帮助把卡得太紧的砖拆下来。", "difficulty": "medium", "id": 6},
+    {"step_hint": "拼之前先在脑海中过一遍步骤，会减少返工。", "difficulty": "easy", "id": 7},
+    {"step_hint": "这步的零件很小，建议用镊子操作。", "difficulty": "hard", "id": 8}
+  ],
+  "facts": [
+    {"fact": "乐高每年生产约 1000 种新零件，但经典的 2x4 砖从 1958 年就没变过。", "id": 1},
+    {"fact": "全世界每个人平均分到的乐高积木超过 80 块。", "id": 2},
+    {"fact": "乐高积木的精度误差不超过 0.002 毫米，这也是它们咬合那么紧的原因。", "id": 3},
+    {"fact": "世界上最高的乐高塔超过 35 米，用了 50 万块积木。", "id": 4},
+    {"fact": "乐高名字来自丹麦语 'leg godt'，意思是 '玩得好'。", "id": 5},
+    {"fact": "如果把所有乐高积木叠起来，可以到达月球的 10 倍距离。", "id": 6},
+    {"fact": "乐高每分钟生产约 36000 块积木。", "id": 7}
+  ],
+  "positive_feedback": [
+    {"text": "整体配色很还原！", "difficulty": "easy", "id": 1},
+    {"text": "拼得不错，就差一点点就完美了！", "difficulty": "medium", "id": 2},
+    {"text": "这个角度搭得很好，很有创意！", "difficulty": "easy", "id": 3},
+    {"text": "比说明书的示例还有个性！", "difficulty": "easy", "id": 4},
+    {"text": "你的空间想象力很强，这一步很多人都拼反了。", "difficulty": "hard", "id": 5},
+    {"text": "拼得很工整，强迫症表示很满意！", "difficulty": "medium", "id": 6}
+  ],
+  "correction_prefix": [
+    {"text": "整体效果很好！不过", "difficulty": "easy", "id": 1},
+    {"text": "配色很还原！不过", "difficulty": "medium", "id": 2},
+    {"text": "拼得不错，不过", "difficulty": "easy", "id": 3},
+    {"text": "这一步基本对了，不过", "difficulty": "medium", "id": 4},
+    {"text": "很有创意！不过", "difficulty": "easy", "id": 5}
+  ]
+}
