@@ -29,6 +29,8 @@ def parse_lego_image(image_url: str) -> dict:
     """
     解析乐高图片，识别零件、颜色、步骤号。
 
+    优先使用零件识别器（CLIP），不可用时回退到多模态 VL 模型。
+
     Args:
         image_url: 本地图片路径
 
@@ -36,6 +38,35 @@ def parse_lego_image(image_url: str) -> dict:
         包含 parts, colors, step_number, confidence 的字典
         若 confidence < 0.7，needs_retry 为 True
     """
+    # 1. 尝试使用零件识别器（CLIP）
+    try:
+        from src.vision.part_recognizer import get_part_recognizer
+        recognizer = get_part_recognizer()
+        results = recognizer.search_by_image(image_url, top_k=3)
+
+        if results and results[0].similarity > 0.6:
+            best = results[0]
+            return {
+                "parts": [{
+                    "name": best.part_info.name,
+                    "color": best.part_info.color,
+                    "quantity": 1,
+                    "part_id": best.part_info.part_id,
+                }],
+                "colors": [best.part_info.color] if best.part_info.color else [],
+                "step_number": None,
+                "confidence": best.similarity,
+                "needs_retry": best.similarity < 0.7,
+                "alternatives": [
+                    {"name": r.part_info.name, "part_id": r.part_info.part_id, "confidence": r.similarity}
+                    for r in results[1:]
+                ],
+                "source": "clip_recognizer",
+            }
+    except Exception as e:
+        print(f"[WARN] 零件识别失败，回退到 VL: {e}")
+
+    # 2. 回退到多模态 VL 模型
     settings = get_settings()
     if settings.use_real_vl:
         return _parse_lego_image_real(image_url)

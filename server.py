@@ -182,13 +182,27 @@ async def stream_chat(request: ChatRequest) -> AsyncGenerator[str, None]:
                 intent=intent.intent_type.value,
             )
 
-        # === 5. 构建增强上下文（L1+L2+L3） ===
+        # === 5. 多路检索融合（L1+L2+L3+L4） ===
+        # 发送思考事件
+        yield sse_event("thinking", {"status": "context", "message": "🔍 多路检索中..."})
+
         context = []
-        if request.conversation_id and mem_manager.r:
-            context = mem_manager.build_enhanced_context(
+        try:
+            from src.retrieval.unified_retriever import get_unified_retriever
+            retriever = get_unified_retriever()
+            context = retriever.build_context(
+                query=resolved_message,
                 conversation_id=request.conversation_id,
-                user_id="default",
+                set_id=request.set_id,
             )
+        except Exception as e:
+            logger.warning(f"统一检索失败，回退到记忆上下文: {e}")
+            # 回退到仅记忆上下文
+            if request.conversation_id and mem_manager.r:
+                context = mem_manager.build_enhanced_context(
+                    conversation_id=request.conversation_id,
+                    user_id="default",
+                )
 
         # 添加当前消息
         all_messages = context + [HumanMessage(content=resolved_message)]
@@ -1252,6 +1266,288 @@ async def multimodal_stats():
     from src.rag.multimodal_store import get_multimodal_store
     store = get_multimodal_store()
     return store.get_stats()
+
+
+# ===== 零件识别端点 =====
+
+@app.post("/api/parts/recognize")
+async def recognize_part(
+    image: UploadFile = File(...),
+    top_k: int = 5,
+):
+    """
+    零件识别：上传零件图片 → 返回最相似的零件信息。
+    """
+    try:
+        image_data = await image.read()
+
+        from src.vision.part_recognizer import get_part_recognizer
+        recognizer = get_part_recognizer()
+        results = recognizer.search_by_image(image_data, top_k=top_k)
+
+        return {
+            "results": [
+                {
+                    "part_id": r.part_info.part_id,
+                    "name": r.part_info.name,
+                    "color": r.part_info.color,
+                    "category": r.part_info.category,
+                    "similarity": r.similarity,
+                }
+                for r in results
+            ],
+            "query_type": "image",
+        }
+    except Exception as e:
+        logger.error(f"零件识别失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"识别失败: {str(e)}")
+
+
+@app.get("/api/parts/search-by-description")
+async def search_parts_by_description(
+    query: str,
+    top_k: int = 5,
+):
+    """
+    以文搜图：描述零件 → 返回匹配的零件。
+    """
+    try:
+        from src.vision.part_recognizer import get_part_recognizer
+        recognizer = get_part_recognizer()
+        results = recognizer.search_by_description(query, top_k=top_k)
+
+        return {
+            "results": [
+                {
+                    "part_id": r.part_info.part_id,
+                    "name": r.part_info.name,
+                    "color": r.part_info.color,
+                    "category": r.part_info.category,
+                    "similarity": r.similarity,
+                }
+                for r in results
+            ],
+            "query": query,
+            "query_type": "text",
+        }
+    except Exception as e:
+        logger.error(f"零件搜索失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+@app.post("/api/parts/verify")
+async def verify_part(
+    image: UploadFile = File(...),
+    expected_part_id: str = Form(""),
+):
+    """
+    零件验证：对比用户图片与参考图片。
+    """
+    try:
+        image_data = await image.read()
+
+        from src.vision.part_recognizer import get_part_recognizer
+        recognizer = get_part_recognizer()
+        result = recognizer.verify_part(image_data, expected_part_id)
+
+        return result
+    except Exception as e:
+        logger.error(f"零件验证失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"验证失败: {str(e)}")
+
+
+@app.post("/api/parts/import-common")
+async def import_common_parts():
+    """导入常见零件到数据库"""
+    try:
+        from src.vision.part_database import build_default_database
+        recognizer = build_default_database()
+        stats = recognizer.get_stats()
+        return {"success": True, "stats": stats}
+    except Exception as e:
+        logger.error(f"导入零件失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+
+
+@app.get("/api/parts/stats")
+async def part_stats():
+    """获取零件数据库统计"""
+    from src.vision.part_recognizer import get_part_recognizer
+    recognizer = get_part_recognizer()
+    return recognizer.get_stats()
+
+
+# ===== 知识图谱端点 =====
+
+@app.get("/api/graph/stats")
+async def graph_stats():
+    """获取知识图谱统计"""
+    from src.kg.graph_retriever import get_graph_retriever
+    retriever = get_graph_retriever()
+    return retriever.get_stats()
+
+
+@app.get("/api/graph/part/{part_id}")
+async def get_part_info(part_id: str):
+    """获取零件信息"""
+    from src.kg.graph_retriever import get_graph_retriever
+    retriever = get_graph_retriever()
+    return retriever.get_part_info(part_id)
+
+
+@app.get("/api/graph/part/{part_id}/alternatives")
+async def get_part_alternatives(part_id: str, limit: int = 5):
+    """获取零件替代方案"""
+    from src.kg.graph_retriever import get_graph_retriever
+    retriever = get_graph_retriever()
+    return {"alternatives": retriever.find_part_alternatives(part_id, limit=limit)}
+
+
+@app.get("/api/graph/set/{set_id}/step/{step_number}")
+async def get_step_info(set_id: str, step_number: int):
+    """获取步骤信息"""
+    from src.kg.graph_retriever import get_graph_retriever
+    retriever = get_graph_retriever()
+    return retriever.get_step_info(set_id, step_number)
+
+
+@app.get("/api/graph/set/{set_id}")
+async def get_set_overview(set_id: str):
+    """获取套装概览"""
+    from src.kg.graph_retriever import get_graph_retriever
+    retriever = get_graph_retriever()
+    return retriever.get_set_overview(set_id)
+
+
+@app.post("/api/graph/build-from-manual")
+async def build_graph_from_manual(
+    file: UploadFile = File(...),
+    set_id: str = Form(""),
+):
+    """
+    从说明书构建知识图谱。
+
+    处理流程：
+    1. PDF → 多模态解析
+    2. 实体抽取（零件/步骤/颜色）
+    3. 构建图谱
+    """
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="只支持 PDF 文件")
+
+    # 保存文件
+    pdf_dir = os.path.join(os.getcwd(), "data", "pdfs")
+    os.makedirs(pdf_dir, exist_ok=True)
+    file_path = os.path.join(pdf_dir, file.filename)
+
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        # 1. 多模态解析
+        from src.rag.multimodal_parser import get_multimodal_parser
+        parser = get_multimodal_parser(dpi=150)
+        pages = parser.parse_pdf(file_path, set_id=set_id)
+
+        # 2. 构建图谱
+        from src.kg.graph_builder import GraphBuilder
+        builder = GraphBuilder()
+        stats = builder.build_from_manual(pages, set_id)
+
+        return {
+            "success": True,
+            "pages_processed": len(pages),
+            **stats,
+        }
+    except Exception as e:
+        logger.error(f"构建图谱失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"构建失败: {str(e)}")
+
+
+@app.delete("/api/graph/clear")
+async def clear_graph():
+    """清除图谱数据"""
+    from src.kg.graph_store import get_graph_store
+    store = get_graph_store()
+    store.clear_all()
+    return {"success": True}
+
+
+# ===== 统一检索端点 =====
+
+@app.post("/api/retrieve")
+async def unified_retrieve(
+    query: str = Form(""),
+    conversation_id: str = Form(""),
+    set_id: str = Form(""),
+    top_k: int = Form(10),
+):
+    """
+    统一检索：多路检索 + 融合。
+
+    检索源：
+    - L1 短期记忆（对话历史）
+    - L2 中期记忆（对话摘要）
+    - L3 长期记忆（用户画像）
+    - L4 向量检索（语义搜索）
+    - L4 图谱检索（关系推理）
+    """
+    try:
+        from src.retrieval.unified_retriever import get_unified_retriever
+        retriever = get_unified_retriever()
+
+        results = retriever.retrieve(
+            query=query,
+            conversation_id=conversation_id,
+            set_id=set_id,
+            top_k=top_k,
+        )
+
+        return {
+            "results": [
+                {
+                    "content": r.content,
+                    "source": r.source,
+                    "score": r.score,
+                    "fused_score": r.fused_score,
+                    "metadata": r.metadata,
+                }
+                for r in results
+            ],
+            "query": query,
+            "total": len(results),
+        }
+    except Exception as e:
+        logger.error(f"统一检索失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"检索失败: {str(e)}")
+
+
+@app.post("/api/retrieve/context")
+async def retrieve_context(
+    query: str = Form(""),
+    conversation_id: str = Form(""),
+    set_id: str = Form(""),
+):
+    """
+    检索 + 构建 LLM 上下文。
+    """
+    try:
+        from src.retrieval.unified_retriever import get_unified_retriever
+        retriever = get_unified_retriever()
+
+        context = retriever.build_context(
+            query=query,
+            conversation_id=conversation_id,
+            set_id=set_id,
+        )
+
+        return {
+            "context": context,
+            "message_count": len(context),
+        }
+    except Exception as e:
+        logger.error(f"上下文构建失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"构建失败: {str(e)}")
 
 
 if __name__ == "__main__":
