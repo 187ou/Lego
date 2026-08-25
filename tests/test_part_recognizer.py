@@ -20,10 +20,15 @@ class TestPartRecognizer:
     """零件识别器测试"""
 
     def setup_method(self):
-        """每个测试创建新的识别器（不加载模型）"""
-        self.recognizer = PartRecognizer(model_name="base", use_fallback=False)
-        # 确保模型未加载（使用 Mock 模式）
-        self.recognizer.model_loaded = False
+        """每个测试创建新的识别器（不加载真实模型）"""
+        # Mock 视觉编码器，避免下载模型
+        with patch("src.vision.part_recognizer.get_visual_encoder") as mock_encoder:
+            mock_enc = MagicMock()
+            mock_enc.model_loaded = False
+            mock_enc.encode_image.return_value = [0.1] * 512
+            mock_enc.encode_text.return_value = [0.1] * 512
+            mock_encoder.return_value = mock_enc
+            self.recognizer = PartRecognizer(model_name="clip", device="cpu")
 
     def test_register_part(self):
         """注册零件"""
@@ -118,9 +123,12 @@ class TestPartRecognizer:
         assert isinstance(sim, float)
 
     def test_mock_embedding(self):
-        """Mock 向量"""
-        emb = self.recognizer._mock_embedding()
-        assert len(emb) == 512
+        """Mock 向量（通过编码器）"""
+        # 配置 mock 返回值
+        mock_emb = [0.5] * 768
+        self.recognizer.encoder._mock_embedding = lambda: mock_emb
+        emb = self.recognizer.encoder._mock_embedding()
+        assert len(emb) == 768  # VisualEncoder 使用 768 维
         assert all(isinstance(v, float) for v in emb)
 
     def test_get_stats(self):

@@ -1,6 +1,6 @@
 """乐高零件识别器
 
-使用乐高专用微调的 CLIP 模型进行零件识别。
+使用统一的 VisualEncoder 进行零件识别。
 支持：
 - 以图搜文：上传零件图片 → 返回零件信息
 - 以文搜图：描述零件 → 返回匹配的零件图片
@@ -14,10 +14,11 @@
 import os
 import io
 import json
-import base64
 from typing import Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from PIL import Image
+
+from src.rag.visual_encoder import VisualEncoder, get_visual_encoder
 
 
 @dataclass
@@ -41,128 +42,40 @@ class RecognitionResult:
 
 
 class PartRecognizer:
-    """乐高零件识别器"""
-
-    # Hugging Face 上的乐高专用 CLIP 模型
-    LEGO_CLIP_MODELS = {
-        "base": "JunkGao/clip-vit-base-patch32_lego-brick",
-        "finetuned_v1": "JunkGao/clip-vit-base-patch32_lego-finetuned",
-        "finetuned_v2": "JunkGao/clip-vit-base-patch32_lego-v2",
-    }
+    """乐高零件识别器（使用统一的 VisualEncoder）"""
 
     def __init__(
         self,
-        model_name: str = "base",
+        model_name: str = "lego_clip",
         device: str = "cpu",
-        use_fallback: bool = True,
     ):
         """
         Args:
-            model_name: 模型名称 ("base", "finetuned_v1", "finetuned_v2", 或 HF 路径)
+            model_name: 模型名称 ("siglip", "clip", "lego_clip")
             device: 运行设备 ("cpu", "cuda")
-            use_fallback: 乐高模型加载失败时是否回退到标准 CLIP
         """
         self.device = device
-        self.use_fallback = use_fallback
-        self.model = None
-        self.processor = None
-        self.model_loaded = False
+        self.model_name = model_name
+
+        # 使用统一的视觉编码器（单例，避免重复加载）
+        self.encoder = get_visual_encoder(model_name=model_name, device=device)
 
         # 零件数据库（内存缓存）
         self._part_database: dict[str, PartInfo] = {}
         self._part_embeddings: dict[str, list[float]] = {}
 
-        self._load_model(model_name)
-
-    def _load_model(self, model_name: str):
-        """加载 CLIP 模型"""
-        try:
-            from transformers import CLIPModel, CLIPProcessor
-
-            # 获取模型 ID
-            model_id = self.LEGO_CLIP_MODELS.get(model_name, model_name)
-
-            print(f"[INFO] 加载 CLIP 模型: {model_id}")
-            self.processor = CLIPProcessor.from_pretrained(model_id)
-            self.model = CLIPModel.from_pretrained(model_id).to(self.device)
-            self.model.eval()
-            self.model_loaded = True
-            print(f"[OK] CLIP 模型加载成功")
-        except Exception as e:
-            print(f"[WARN] 乐高 CLIP 加载失败: {e}")
-            if self.use_fallback:
-                print("[INFO] 回退到标准 CLIP 模型")
-                self._load_standard_clip()
-            else:
-                print("[WARN] 零件识别功能将使用 Mock 模式")
-
-    def _load_standard_clip(self):
-        """加载标准 CLIP 模型"""
-        try:
-            from transformers import CLIPModel, CLIPProcessor
-
-            model_id = "openai/clip-vit-base-patch32"
-            self.processor = CLIPProcessor.from_pretrained(model_id)
-            self.model = CLIPModel.from_pretrained(model_id).to(self.device)
-            self.model.eval()
-            self.model_loaded = True
-            print(f"[OK] 标准 CLIP 模型加载成功")
-        except Exception as e:
-            print(f"[WARN] 标准 CLIP 也加载失败: {e}")
-            self.model_loaded = False
+    @property
+    def model_loaded(self) -> bool:
+        """模型是否加载"""
+        return self.encoder.model_loaded
 
     def encode_image(self, image: Union[str, bytes, Image.Image]) -> list[float]:
-        """
-        编码零件图片为向量。
-
-        Args:
-            image: 图片路径/PIL Image/bytes
-
-        Returns:
-            图片向量
-        """
-        if not self.model_loaded:
-            return self._mock_embedding()
-
-        # 加载图片
-        img = self._load_image(image)
-
-        # 编码
-        import torch
-
-        inputs = self.processor(images=img, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            outputs = self.model.get_image_features(**inputs)
-
-        # 归一化
-        embedding = outputs.cpu().numpy()[0]
-        embedding = embedding / (embedding.norm() + 1e-8)
-
-        return embedding.tolist()
+        """编码零件图片为向量"""
+        return self.encoder.encode_image(image)
 
     def encode_text(self, text: str) -> list[float]:
-        """
-        编码文本描述为向量。
-
-        Args:
-            text: 文本描述
-
-        Returns:
-            文本向量
-        """
-        if not self.model_loaded:
-            return self._mock_embedding()
-
-        import torch
-
-        inputs = self.processor(text=[text], return_tensors="pt", padding=True).to(self.device)
-        with torch.no_grad():
-            outputs = self.model.get_text_features(**inputs)
-
-        embedding = outputs.cpu().numpy()[0]
-        embedding = embedding / (embedding.norm() + 1e-8)
-
-        return embedding.tolist()
+        """编码文本描述为向量"""
+        return self.encoder.encode_text(text)
 
     def register_part(
         self,
@@ -361,17 +274,6 @@ class PartRecognizer:
         import numpy as np
         return float(np.dot(emb1, emb2))
 
-    def _mock_embedding(self) -> list[float]:
-        """
-        Mock 向量（模型未加载时使用）。
-
-        使用固定种子确保同一输入产生相同输出。
-        """
-        import random
-        # 使用固定种子，确保结果可复现
-        rng = random.Random(42)
-        return [rng.random() for _ in range(512)]
-
     def get_stats(self) -> dict:
         """获取统计信息"""
         return {
@@ -386,7 +288,7 @@ _recognizer: Optional[PartRecognizer] = None
 
 
 def get_part_recognizer(
-    model_name: str = "base",
+    model_name: str = "lego_clip",
     device: str = "cpu",
 ) -> PartRecognizer:
     """获取零件识别器单例"""
