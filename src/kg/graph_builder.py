@@ -175,40 +175,138 @@ class GraphBuilder:
         return stats
 
     def _extract_parts(self, text: str) -> list[dict]:
-        """从文本中提取零件信息"""
+        """
+        从文本中提取零件信息（改进版）。
+
+        支持更多格式：
+        - 零件编号：3001, 3005 等 4-5 位数字
+        - 颜色：红色、蓝色、深红等
+        - 数量：2块、3个、x2 等
+        - 尺寸：2x4、1x2 等
+        """
         parts = []
 
-        # 匹配零件编号（如 3001, 3005）
+        # 1. 匹配零件编号（4-5 位数字）
         part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", text)
 
         for part_id in set(part_ids):
-            # 尝试提取零件名称和颜色
+            # 提取零件名称
             name = self._lookup_part_name(part_id)
-            color = self._extract_color(text, part_id)
+
+            # 提取颜色（在零件号附近查找）
+            color = self._extract_color_near_part(text, part_id)
+
+            # 提取数量
+            quantity = self._extract_quantity_near_part(text, part_id)
 
             parts.append({
                 "part_id": part_id,
                 "name": name,
                 "color": color,
-                "quantity": 1,
+                "quantity": quantity,
             })
 
         return parts
 
+    def _extract_color_near_part(self, text: str, part_id: str) -> str:
+        """在零件号附近提取颜色"""
+        # 在零件号前后 20 个字符内查找颜色
+        idx = text.find(part_id)
+        if idx == -1:
+            return ""
+
+        # 取零件号前后的文本片段
+        start = max(0, idx - 20)
+        end = min(len(text), idx + len(part_id) + 20)
+        nearby_text = text[start:end]
+
+        # 优先匹配复合颜色
+        compound_colors = ["深红", "浅红", "深蓝", "浅蓝", "透明", "深绿", "浅绿"]
+        for color in compound_colors:
+            if color in nearby_text:
+                return color
+
+        # 匹配基本颜色
+        basic_colors = ["红", "蓝", "黄", "绿", "白", "黑", "灰", "橙", "棕", "紫", "粉"]
+        for color in basic_colors:
+            if color in nearby_text:
+                return color
+
+        return ""
+
+    def _extract_quantity_near_part(self, text: str, part_id: str) -> int:
+        """在零件号附近提取数量"""
+        idx = text.find(part_id)
+        if idx == -1:
+            return 1
+
+        # 取零件号前后的文本片段
+        start = max(0, idx - 15)
+        end = min(len(text), idx + len(part_id) + 15)
+        nearby_text = text[start:end]
+
+        # 匹配数量：2块、3个、x2、*3 等
+        qty_match = re.search(r'(\d+)\s*(块|个|件|颗)', nearby_text)
+        if qty_match:
+            return int(qty_match.group(1))
+
+        qty_match = re.search(r'[xX*]\s*(\d+)', nearby_text)
+        if qty_match:
+            return int(qty_match.group(1))
+
+        return 1
+
     def _lookup_part_name(self, part_id: str) -> str:
-        """查找零件名称"""
-        # 常见零件名称映射
+        """
+        查找零件名称（扩展版）。
+
+        支持更多零件类型，包括 Brick/Plate/Slope/Tile 等。
+        """
+        # 常见零件名称映射（扩展版）
         common_names = {
+            # Brick 系列
             "3001": "Brick 2x4",
             "3002": "Brick 2x3",
             "3003": "Brick 2x2",
+            "3004": "Brick 1x2",
             "3005": "Brick 1x1",
+            "3008": "Brick 1x8",
+            "3009": "Brick 1x6",
             "3010": "Brick 1x4",
-            "3020": "Plate 2x4",
-            "3023": "Plate 1x2",
             "3622": "Brick 1x3",
+            # Plate 系列
+            "3020": "Plate 2x4",
+            "3021": "Plate 2x3",
+            "3022": "Plate 2x2",
+            "3023": "Plate 1x2",
+            "3024": "Plate 1x1",
+            "3031": "Plate 4x4",
+            "3034": "Plate 2x8",
+            # Tile 系列
             "3069": "Tile 1x2",
             "3070": "Tile 1x1",
+            "3068": "Tile 2x2",
+            # Slope 系列
+            "3039": "Slope 45° 2x2",
+            "3040": "Slope 45° 2x1",
+            "3048": "Slope 45° 2x1 Double",
+            # Technic 系列
+            "3700": "Technic Brick 1x2",
+            "3701": "Technic Brick 1x4",
+            "3713": "Technic Bush",
+            "4019": "Technic Pin",
+            # 其他
+            "3006": "Brick 2x10",
+            "3007": "Brick 2x8",
+            "3460": "Plate 1x8",
+            "3795": "Plate 2x6",
+            "3036": "Plate 6x8",
+            "3035": "Plate 4x6",
+            "3032": "Plate 4x4",
+            "3030": "Plate 4x10",
+            "3832": "Plate 2x10",
+            "3659": "Brick 1x1 with Stud",
+            "30414": "Brick 1x4 with 4 Studs",
         }
         return common_names.get(part_id, f"Part {part_id}")
 

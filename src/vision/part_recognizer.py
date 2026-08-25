@@ -362,9 +362,15 @@ class PartRecognizer:
         return float(np.dot(emb1, emb2))
 
     def _mock_embedding(self) -> list[float]:
-        """Mock 向量（模型未加载时使用）"""
+        """
+        Mock 向量（模型未加载时使用）。
+
+        使用固定种子确保同一输入产生相同输出。
+        """
         import random
-        return [random.random() for _ in range(512)]
+        # 使用固定种子，确保结果可复现
+        rng = random.Random(42)
+        return [rng.random() for _ in range(512)]
 
     def get_stats(self) -> dict:
         """获取统计信息"""

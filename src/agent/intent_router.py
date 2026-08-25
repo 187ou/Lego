@@ -22,6 +22,7 @@ L3 完整 Agent（2-5s，LLM 推理）
 """
 
 import re
+import threading
 from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -309,8 +310,9 @@ def _is_empty_or_symbol_only(message: str) -> bool:
 # ===== 上下文管理（用于指代消解） =====
 
 class ConversationContext:
-    """对话上下文（单例，记录最近提到的步骤号等）"""
+    """对话上下文（线程安全单例，记录最近提到的步骤号等）"""
     _instance = None
+    _lock = threading.Lock()
 
     def __init__(self):
         self._last_step_number: Optional[int] = None
@@ -319,20 +321,32 @@ class ConversationContext:
     @classmethod
     def get(cls) -> "ConversationContext":
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def update_step(self, step: int):
-        self._last_step_number = step
+        with self._lock:
+            self._last_step_number = step
 
     def get_last_step(self) -> Optional[int]:
-        return self._last_step_number
+        with self._lock:
+            return self._last_step_number
 
     def update_set(self, set_id: str):
-        self._last_set_id = set_id
+        with self._lock:
+            self._last_set_id = set_id
 
     def get_last_set(self) -> str:
-        return self._last_set_id
+        with self._lock:
+            return self._last_set_id
+
+    def reset(self):
+        """重置上下文"""
+        with self._lock:
+            self._last_step_number = None
+            self._last_set_id = ""
 
 
 # 模块加载时立即创建实例
@@ -568,6 +582,4 @@ def get_cache_info() -> dict:
 def clear_cache():
     """清除路由缓存（路由规则变更后调用）"""
     _cached_classify.cache_clear()
-    ctx = ConversationContext.get()
-    ctx._last_step_number = None
-    ctx._last_set_id = ""
+    ConversationContext.get().reset()

@@ -263,8 +263,15 @@ class MockGraphStore(GraphStore):
                     })
         return results[:limit]
 
-    def find_alternatives(self, part_id: str, limit: int = 5) -> list[dict]:
-        """查找替代零件（BFS）"""
+    def find_alternatives(self, part_id: str, limit: int = 5, max_depth: int = 3) -> list[dict]:
+        """
+        查找替代零件（BFS，带深度限制）。
+
+        Args:
+            part_id: 零件编号
+            limit: 返回数量
+            max_depth: 最大搜索深度（跳数）
+        """
         node_id = f"part_{part_id}"
         visited = {node_id}
         queue = [(node_id, 0)]
@@ -272,6 +279,10 @@ class MockGraphStore(GraphStore):
 
         while queue and len(results) < limit:
             current_id, distance = queue.pop(0)
+
+            # 深度限制
+            if distance >= max_depth:
+                continue
 
             for rel in self._relations:
                 if rel.relation_type == RelationType.CAN_REPLACE:

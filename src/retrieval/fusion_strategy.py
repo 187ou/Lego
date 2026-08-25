@@ -176,14 +176,39 @@ class FusionStrategy:
         return unique
 
     def _text_similarity(self, text1: str, text2: str) -> float:
-        """简单的文本相似度（Jaccard）"""
+        """
+        文本相似度（改进版）。
+
+        使用 N-gram + Jaccard 组合，比纯字符级 Jaccard 更准确。
+        对于短文本使用 bigram，长文本使用 trigram。
+        """
         if not text1 or not text2:
             return 0.0
 
-        set1 = set(text1)
-        set2 = set(text2)
+        # 完全相同
+        if text1 == text2:
+            return 1.0
 
-        intersection = set1 & set2
-        union = set1 | set2
+        # 包含关系
+        if text1 in text2 or text2 in text1:
+            return 0.9
+
+        # 使用 N-gram Jaccard
+        n = 2 if len(text1) < 20 and len(text2) < 20 else 3
+
+        def get_ngrams(text, n):
+            """获取 N-gram 集合"""
+            if len(text) < n:
+                return set(text)
+            return {text[i:i+n] for i in range(len(text) - n + 1)}
+
+        ngrams1 = get_ngrams(text1, n)
+        ngrams2 = get_ngrams(text2, n)
+
+        if not ngrams1 or not ngrams2:
+            return 0.0
+
+        intersection = ngrams1 & ngrams2
+        union = ngrams1 | ngrams2
 
         return len(intersection) / len(union) if union else 0.0

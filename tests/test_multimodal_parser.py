@@ -63,7 +63,7 @@ class TestMultimodalManualParser:
             self.parser.parse_image("/nonexistent/image.png", "test_set")
 
     def test_to_documents(self):
-        """转换为 Document"""
+        """转换为 Document（图片不再存 base64）"""
         page = MultimodalPage(
             page_number=1,
             set_id="test_set",
@@ -83,7 +83,9 @@ class TestMultimodalManualParser:
         assert len(text_doc) == 1
         assert len(img_doc) == 1
         assert text_doc[0].page_content == "测试文本内容"
-        assert "image_base64" in img_doc[0].metadata
+        # 图片不再存 base64，只存元数据
+        assert "image_base64" not in img_doc[0].metadata
+        assert "image_size" in img_doc[0].metadata
 
     def test_page_region(self):
         """页面区域"""

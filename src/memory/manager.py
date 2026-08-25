@@ -58,8 +58,8 @@ class MemoryManager:
     def __init__(self):
         self._redis = None
         self._config = MemoryConfig()
-        # L0 工作内存（不持久化，按 conversation_id 缓存）
-        self._working_memory: dict[str, WorkingMemory] = {}
+        # L0 工作内存缓存（热数据，减少 Redis 读取）
+        self._working_memory_cache: dict[str, WorkingMemory] = {}
 
     @property
     def r(self):
@@ -68,30 +68,93 @@ class MemoryManager:
         return self._redis
 
     # =========================================================================
-    # L0: 工作记忆（内存，不持久化）
+    # L0: 工作记忆（Redis 持久化 + 内存缓存）
     # =========================================================================
 
     def get_working_memory(self, conversation_id: str) -> WorkingMemory:
-        """获取/创建工作记忆"""
-        if conversation_id not in self._working_memory:
-            self._working_memory[conversation_id] = WorkingMemory(
-                conversation_id=conversation_id,
-                last_active_time=time.time(),
-            )
-        return self._working_memory[conversation_id]
+        """
+        获取工作记忆。
+        优先从内存缓存读取，未命中则从 Redis 加载。
+        """
+        # 1. 检查内存缓存
+        if conversation_id in self._working_memory_cache:
+            return self._working_memory_cache[conversation_id]
+
+        # 2. 从 Redis 加载
+        wm = self._load_working_memory_from_redis(conversation_id)
+
+        # 3. 放入缓存
+        self._working_memory_cache[conversation_id] = wm
+        return wm
 
     def update_working_memory(self, conversation_id: str, **kwargs) -> WorkingMemory:
-        """更新工作记忆"""
+        """
+        更新工作记忆。
+        同时更新内存缓存和 Redis。
+        """
         wm = self.get_working_memory(conversation_id)
         for key, value in kwargs.items():
             if hasattr(wm, key):
                 setattr(wm, key, value)
         wm.last_active_time = time.time()
+
+        # 持久化到 Redis
+        self._save_working_memory_to_redis(wm)
         return wm
 
     def clear_working_memory(self, conversation_id: str):
-        """清除工作记忆"""
-        self._working_memory.pop(conversation_id, None)
+        """清除工作记忆（内存缓存 + Redis）"""
+        self._working_memory_cache.pop(conversation_id, None)
+        try:
+            if self.r:
+                self.r.delete(f"conv:{conversation_id}:working_memory")
+        except Exception as e:
+            print(f"[WARN] 清除工作记忆失败: {e}")
+
+    def _load_working_memory_from_redis(self, conversation_id: str) -> WorkingMemory:
+        """从 Redis 加载工作记忆"""
+        try:
+            if self.r:
+                data = self.r.hgetall(f"conv:{conversation_id}:working_memory")
+                if data:
+                    # 转换类型
+                    return WorkingMemory(
+                        conversation_id=conversation_id,
+                        current_intent=data.get("current_intent", ""),
+                        current_set_id=data.get("current_set_id", ""),
+                        current_step=int(data.get("current_step", 0)),
+                        frustration_score=int(data.get("frustration_score", 0)),
+                        retry_count=int(data.get("retry_count", 0)),
+                        last_active_time=float(data.get("last_active_time", 0)),
+                        last_discussed_step=int(data.get("last_discussed_step", 0)),
+                    )
+        except Exception as e:
+            print(f"[WARN] 从 Redis 加载工作记忆失败: {e}")
+
+        # 默认值
+        return WorkingMemory(
+            conversation_id=conversation_id,
+            last_active_time=time.time(),
+        )
+
+    def _save_working_memory_to_redis(self, wm: WorkingMemory):
+        """保存工作记忆到 Redis"""
+        try:
+            if self.r:
+                data = {
+                    "current_intent": wm.current_intent,
+                    "current_set_id": wm.current_set_id,
+                    "current_step": str(wm.current_step),
+                    "frustration_score": str(wm.frustration_score),
+                    "retry_count": str(wm.retry_count),
+                    "last_active_time": str(wm.last_active_time),
+                    "last_discussed_step": str(wm.last_discussed_step),
+                }
+                self.r.hset(f"conv:{wm.conversation_id}:working_memory", mapping=data)
+                # 设置过期时间（7 天）
+                self.r.expire(f"conv:{wm.conversation_id}:working_memory", 7 * 24 * 3600)
+        except Exception as e:
+            print(f"[WARN] 保存工作记忆到 Redis 失败: {e}")
 
     # =========================================================================
     # L1: 短期记忆（Redis 持久化）
@@ -537,30 +600,58 @@ class MemoryManager:
         return importance
 
     def _extract_entities(self, content: str) -> list[str]:
-        """从内容中提取实体（零件号/颜色/步骤号）"""
+        """
+        从内容中提取实体（零件号/颜色/步骤号/数量）。
+
+        改进版：更全面的实体抽取，覆盖更多格式。
+        """
         entities = []
 
-        # 提取零件编号（如 3001, 3005）- 使用更宽松的匹配
-        # 匹配独立的 4-5 位数字（前后不是数字）
+        # 1. 提取零件编号（4-5 位数字，前后不是数字）
         part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", content)
         entities.extend(part_ids)
 
-        # 提取步骤号
-        steps = re.findall(r"第?\s*(\d+)\s*步", content)
-        entities.extend([f"step_{s}" for s in steps])
+        # 2. 提取步骤号（支持多种格式）
+        # 格式1: "第35步"、"第 35 步"
+        # 格式2: "步骤35"、"步骤 35"
+        # 格式3: "step 35"、"Step35"
+        # 格式4: 纯数字 + "步"
+        step_patterns = [
+            r"第\s*(\d+)\s*步",
+            r"步骤\s*(\d+)",
+            r"step\s*(\d+)",
+            r"(\d+)\s*步",
+        ]
+        for pattern in step_patterns:
+            steps = re.findall(pattern, content, re.IGNORECASE)
+            entities.extend([f"step_{s}" for s in steps])
 
-        # 提取颜色（优先匹配复合颜色）
+        # 3. 提取颜色（优先匹配复合颜色，再匹配基本颜色）
         color_matched = False
-        for color in ["深红", "浅红", "深蓝", "浅蓝", "透明"]:
+        compound_colors = ["深红", "浅红", "深蓝", "浅蓝", "透明", "深绿", "浅绿", "深灰", "浅灰"]
+        for color in compound_colors:
             if color in content:
                 entities.append(f"color_{color}")
                 color_matched = True
                 break
+
         if not color_matched:
-            for color in ["红", "蓝", "黄", "绿", "白", "黑", "灰", "橙", "棕", "紫", "粉"]:
-                if color in content:
+            basic_colors = ["红", "蓝", "黄", "绿", "白", "黑", "灰", "橙", "棕", "紫", "粉",
+                           "red", "blue", "yellow", "green", "white", "black", "gray", "orange"]
+            for color in basic_colors:
+                if color in content.lower():
                     entities.append(f"color_{color}")
                     break
+
+        # 4. 提取数量信息（如"2块"、"3个"、"x2"）
+        quantities = re.findall(r'(\d+)\s*(块|个|件|颗|x)', content, re.IGNORECASE)
+        for qty, _ in quantities:
+            entities.append(f"qty_{qty}")
+
+        # 5. 提取尺寸信息（如"2x4"、"1x2"）
+        sizes = re.findall(r'(\d+)\s*[xX×]\s*(\d+)', content)
+        for w, h in sizes:
+            entities.append(f"size_{w}x{h}")
 
         return list(set(entities))
 
@@ -599,13 +690,16 @@ class MemoryManager:
             return {"error": "Cache info unavailable"}
 
 
-# 全局单例
-_manager: Optional[MemoryManager] = None
+# 线程安全单例
+from src.common.singleton import singleton
+
+
+@singleton
+class MemoryManagerSingleton(MemoryManager):
+    """线程安全的记忆管理器单例"""
+    pass
 
 
 def get_memory_manager() -> MemoryManager:
-    """获取记忆管理器单例"""
-    global _manager
-    if _manager is None:
-        _manager = MemoryManager()
-    return _manager
+    """获取记忆管理器单例（线程安全）"""
+    return MemoryManagerSingleton()

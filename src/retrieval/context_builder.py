@@ -150,12 +150,27 @@ class ContextBuilder:
         return "\n".join(parts)
 
     def _estimate_tokens(self, text: str) -> int:
-        """估算 token 数（简化版：中文约 1.5 char/token，英文约 4 char/token）"""
+        """
+        估算 token 数（改进版）。
+
+        使用更准确的估算方法：
+        - 中文：约 1.5-2 字符/token（GPT  tokenizer 特性）
+        - 英文：约 4 字符/token
+        - 标点和空格也计入
+        """
         if not text:
             return 0
 
-        # 简单估算：中文字符数 + 英文单词数
+        # 统计中文字符
         chinese_chars = sum(1 for c in text if '一' <= c <= '鿿')
-        english_words = len(text.split()) - chinese_chars
 
-        return chinese_chars + english_words * 2
+        # 统计非中文部分（英文 + 数字 + 标点）
+        non_chinese_len = len(text) - chinese_chars
+
+        # 中文：约 1.5 字符/token
+        chinese_tokens = int(chinese_chars / 1.5) + 1
+
+        # 英文/其他：约 4 字符/token
+        english_tokens = int(non_chinese_len / 4) + 1
+
+        return chinese_tokens + english_tokens

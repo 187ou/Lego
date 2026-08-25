@@ -9,12 +9,13 @@
 存储结构：
 - ChromaDB collection: lego_multimodal
   - 文本文档: modality=text
-  - 图片文档: modality=image, image_base64=...
+  - 图片文档: modality=image, image_path=...（图片存文件系统）
+- 文件系统: data/images/{set_id}/{doc_id}.png
 """
 
 import os
 import json
-import base64
+import hashlib
 from typing import Optional, Union
 from io import BytesIO
 
@@ -42,6 +43,10 @@ class MultimodalVectorStore:
         # 持久化存储
         persist_dir = os.path.join(os.getcwd(), "data", "chroma_multimodal")
         os.makedirs(persist_dir, exist_ok=True)
+
+        # 图片存储目录
+        self.image_dir = os.path.join(os.getcwd(), "data", "images")
+        os.makedirs(self.image_dir, exist_ok=True)
 
         self.client = PersistentClient(
             path=persist_dir,
@@ -71,8 +76,44 @@ class MultimodalVectorStore:
             embedding_function=self.text_embeddings,  # 占位，实际用视觉编码器
         )
 
-        # 缓存
-        self._image_cache: dict[str, bytes] = {}  # doc_id → image_bytes
+        # 图片路径缓存（doc_id → 相对路径）
+        self._image_path_cache: dict[str, str] = {}
+
+    def _save_image_to_file(self, image_data: bytes, set_id: str, doc_id: str) -> str:
+        """
+        保存图片到文件系统。
+
+        Args:
+            image_data: 图片 bytes
+            set_id: 套装编号
+            doc_id: 文档 ID
+
+        Returns:
+            相对路径（如 "10295/page_1.png"）
+        """
+        # 创建套装目录
+        set_dir = os.path.join(self.image_dir, set_id)
+        os.makedirs(set_dir, exist_ok=True)
+
+        # 生成文件名（使用 doc_id 的 hash 避免特殊字符）
+        filename = f"{hashlib.md5(doc_id.encode()).hexdigest()[:12]}.png"
+        filepath = os.path.join(set_dir, filename)
+
+        # 写入文件
+        with open(filepath, "wb") as f:
+            f.write(image_data)
+
+        # 返回相对路径
+        rel_path = os.path.relpath(filepath, self.image_dir)
+        return rel_path
+
+    def _load_image_from_file(self, rel_path: str) -> Optional[bytes]:
+        """从文件系统加载图片"""
+        filepath = os.path.join(self.image_dir, rel_path)
+        if os.path.exists(filepath):
+            with open(filepath, "rb") as f:
+                return f.read()
+        return None
 
     def add_pages(self, pages: list, set_id: str = "") -> int:
         """
@@ -97,11 +138,11 @@ class MultimodalVectorStore:
             # 2. 生成唯一 ID
             doc_id = f"{set_id}_page_{page.page_number}"
 
-            # 3. 存储图片数据
-            self._image_cache[doc_id] = page.full_image
+            # 3. 保存图片到文件系统（不再存入元数据）
+            image_path = self._save_image_to_file(page.full_image, set_id, doc_id)
+            self._image_path_cache[doc_id] = image_path
 
-            # 4. 创建图片 Document
-            img_b64 = base64.b64encode(page.full_image).decode("utf-8")
+            # 4. 创建图片 Document（只存路径，不存 base64）
             img_doc = Document(
                 page_content=f"[PAGE_IMAGE_{page.page_number}]",
                 metadata={
@@ -109,7 +150,7 @@ class MultimodalVectorStore:
                     "page_number": page.page_number,
                     "modality": "image",
                     "doc_id": doc_id,
-                    "image_base64": img_b64,
+                    "image_path": image_path,  # 只存路径
                     "source": page.metadata.get("source", ""),
                 },
             )
@@ -265,8 +306,24 @@ class MultimodalVectorStore:
         return fused[:top_k]
 
     def _get_image(self, doc_id: str) -> Optional[bytes]:
-        """获取图片数据"""
-        return self._image_cache.get(doc_id)
+        """获取图片数据（从文件系统加载）"""
+        # 1. 从缓存路径查找
+        rel_path = self._image_path_cache.get(doc_id)
+        if rel_path:
+            return self._load_image_from_file(rel_path)
+
+        # 2. 尝试从元数据中恢复（兼容旧数据）
+        try:
+            result = self.image_store._collection.get(ids=[doc_id])
+            if result["metadatas"]:
+                metadata = result["metadatas"][0]
+                image_path = metadata.get("image_path")
+                if image_path:
+                    return self._load_image_from_file(image_path)
+        except Exception:
+            pass
+
+        return None
 
     def get_stats(self) -> dict:
         """获取统计信息"""
@@ -276,7 +333,8 @@ class MultimodalVectorStore:
             return {
                 "text_documents": text_count,
                 "image_documents": image_count,
-                "cached_images": len(self._image_cache),
+                "stored_images": len(self._image_path_cache),
+                "image_dir": self.image_dir,
             }
         except Exception:
             return {"text_documents": 0, "image_documents": 0}
