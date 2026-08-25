@@ -219,7 +219,19 @@ def build_graph(llm: BaseChatModel):
             return {"needs_graph_reasoning": False, "graph_reasoning_result": {}}
 
     def _detect_reasoning_type(message: str) -> str:
-        """检测用户消息需要的推理类型"""
+        """
+        检测用户消息需要的推理类型。
+        返回空字符串表示不需要图谱推理。
+        """
+        if not message or not message.strip():
+            return ""
+
+        # 否定检测：如果消息以否定词开头，不触发推理
+        negation_prefixes = ["不要", "不需要", "不想", "别", "不用"]
+        for prefix in negation_prefixes:
+            if message.strip().startswith(prefix):
+                return ""
+
         # 约束推理特征：提到"替代""缺""没有""可以...吗"且涉及多个零件
         constraint_patterns = [
             r"(缺|没有|替代|替换|代替).*(可以|用什么|有什么)",
@@ -227,7 +239,12 @@ def build_graph(llm: BaseChatModel):
             r"(可以|能).*(替代|替换|代替)",
         ]
         for p in constraint_patterns:
-            if re.search(p, message):
+            match = re.search(p, message)
+            if match:
+                # 检查匹配位置前是否有否定词
+                prefix = message[:match.start()]
+                if any(neg in prefix for neg in ["不", "没", "别"]):
+                    continue
                 # 检查是否涉及多个零件号
                 part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", message)
                 if len(part_ids) >= 2:
@@ -249,7 +266,11 @@ def build_graph(llm: BaseChatModel):
             r"(会不会|能承受|撑得住)",
         ]
         for p in stability_patterns:
-            if re.search(p, message):
+            match = re.search(p, message)
+            if match:
+                prefix = message[:match.start()]
+                if any(neg in prefix for neg in ["不", "没", "别"]):
+                    continue
                 return "stability"
 
         return ""

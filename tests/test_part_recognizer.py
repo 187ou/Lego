@@ -56,7 +56,9 @@ class TestPartRecognizer:
         # assert "3001" in self.recognizer._part_embeddings
 
     def test_search_by_image_empty_db(self):
-        """空数据库搜索"""
+        """空数据库搜索（清空自动注册的零件）"""
+        self.recognizer._part_database.clear()
+        self.recognizer._part_embeddings.clear()
         from PIL import Image
 
         img = Image.new("RGB", (100, 100), color="red")
@@ -64,8 +66,10 @@ class TestPartRecognizer:
         assert results == []
 
     def test_search_by_description_empty_db(self):
-        """空数据库描述搜索"""
-        results = self.recognizer.search_by_description("红色砖")
+        """空数据库描述搜索（清空自动注册的零件）"""
+        self.recognizer._part_database.clear()
+        self.recognizer._part_embeddings.clear()
+        results = self.recognizer.search_by_description("red brick")
         assert results == []
 
     def test_search_by_image_with_parts(self):
@@ -211,6 +215,155 @@ class TestRecognitionResult:
 
 # 修复导入
 import io
+
+
+class TestAutoRegistration:
+    """自动注册常见零件测试"""
+
+    def test_auto_registers_common_parts(self):
+        """PartRecognizer 初始化时自动注册常见零件"""
+        import os
+        os.environ["USE_REAL_CLIP"] = "false"
+
+        with patch("src.vision.part_recognizer.get_visual_encoder") as mock_encoder:
+            mock_enc = MagicMock()
+            mock_enc.model_loaded = True
+            mock_enc.encode_text.return_value = [0.1] * 768
+            mock_encoder.return_value = mock_enc
+
+            from src.vision.part_recognizer import PartRecognizer
+            r = PartRecognizer(model_name="clip", device="cpu")
+
+            # 应自动注册常见零件
+            assert len(r._part_database) > 0
+            assert len(r._part_embeddings) > 0
+
+    def test_auto_registration_handles_errors(self):
+        """自动注册失败不应崩溃"""
+        import os
+        os.environ["USE_REAL_CLIP"] = "false"
+
+        with patch("src.vision.part_recognizer.get_visual_encoder") as mock_encoder:
+            mock_enc = MagicMock()
+            mock_enc.model_loaded = True
+            mock_enc.encode_text.side_effect = RuntimeError("encoding failed")
+            mock_encoder.return_value = mock_enc
+
+            from src.vision.part_recognizer import PartRecognizer
+            # 不应崩溃
+            r = PartRecognizer(model_name="clip", device="cpu")
+            assert isinstance(r._part_database, dict)
+
+
+class TestCosineSimilarity:
+    """余弦相似度测试"""
+
+    def setup_method(self):
+        with patch("src.vision.part_recognizer.get_visual_encoder") as mock_encoder:
+            mock_enc = MagicMock()
+            mock_enc.model_loaded = False
+            mock_encoder.return_value = mock_enc
+            from src.vision.part_recognizer import PartRecognizer
+            self.r = PartRecognizer(model_name="clip", device="cpu")
+
+    def test_identical_vectors(self):
+        """相同向量相似度为1"""
+        emb = [1.0, 0.0, 0.0]
+        sim = self.r._cosine_similarity(emb, emb)
+        assert sim == pytest.approx(1.0)
+
+    def test_orthogonal_vectors(self):
+        """正交向量相似度为0"""
+        sim = self.r._cosine_similarity([1, 0, 0], [0, 1, 0])
+        assert sim == pytest.approx(0.0, abs=0.01)
+
+    def test_opposite_vectors(self):
+        """反向向量相似度为-1"""
+        sim = self.r._cosine_similarity([1, 0, 0], [-1, 0, 0])
+        assert sim == pytest.approx(-1.0)
+
+    def test_dimension_mismatch(self):
+        """维度不匹配时应截断到较短长度"""
+        sim = self.r._cosine_similarity([1, 0, 0, 0], [1, 0, 0])
+        assert isinstance(sim, float)
+
+    def test_zero_vector(self):
+        """零向量应返回0"""
+        sim = self.r._cosine_similarity([0, 0, 0], [1, 0, 0])
+        assert sim == 0.0
+
+
+# === clip_checker 测试 ===
+
+class TestClipChecker:
+    """CLIP 验真测试"""
+
+    def test_mock_mode_returns_mock(self):
+        """Mock 模式返回固定结果"""
+        import os
+        os.environ["USE_REAL_CLIP"] = "false"
+
+        from src.verification.clip_checker import compare_images
+        result = compare_images("dummy1.png", "dummy2.png")
+        assert result["verdict"] == "pass"
+        assert result["similarity"] == 0.92
+        assert "[Mock]" in result["details"]
+
+    def test_real_clip_with_same_images(self):
+        """真实 CLIP 对比相同图片"""
+        import os
+        os.environ["USE_REAL_CLIP"] = "true"
+
+        from src.verification.clip_checker import compare_images
+        from src.kg.image_generator import generate_part_image
+        import tempfile
+
+        img1 = generate_part_image("Brick 2x4", 2, 4, "Red")
+        img2 = generate_part_image("Brick 2x4", 2, 4, "Red")
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f1:
+            f1.write(img1); path1 = f1.name
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f2:
+            f2.write(img2); path2 = f2.name
+
+        try:
+            result = compare_images(path1, path2)
+            assert "verdict" in result
+            assert "similarity" in result
+            assert "region_results" in result
+            assert isinstance(result["region_results"], list)
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
+
+    def test_region_comparison_returns_grid(self):
+        """区域对比应返回 grid_size^2 个区域"""
+        import os
+
+        # 强制重新加载 CLIP 模型（避免被其他测试的状态影响）
+        import src.verification.clip_checker as cc
+        cc._clip_model = None
+        cc._clip_processor = None
+        cc.USE_REAL_CLIP = True
+
+        from src.verification.clip_checker import compare_images
+        from src.kg.image_generator import generate_part_image
+        import tempfile
+
+        img1 = generate_part_image("Brick 2x4", 2, 4, "Red")
+        img2 = generate_part_image("Brick 2x4", 2, 4, "Blue")
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f1:
+            f1.write(img1); path1 = f1.name
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f2:
+            f2.write(img2); path2 = f2.name
+
+        try:
+            result = compare_images(path1, path2, grid_size=3)
+            assert len(result["region_results"]) == 9
+        finally:
+            os.unlink(path1)
+            os.unlink(path2)
 
 
 if __name__ == "__main__":

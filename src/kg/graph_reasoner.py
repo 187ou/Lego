@@ -65,6 +65,7 @@ class GraphReasoner:
         query: str,
         reasoning_type: str = REASONING_CONSTRAINT,
         context: Optional[dict] = None,
+        timeout: float = 30.0,
     ) -> dict:
         """
         通用图谱推理入口。
@@ -73,26 +74,54 @@ class GraphReasoner:
             query: 用户查询
             reasoning_type: 推理类型（constraint / chain / stability）
             context: 额外上下文（如 set_id, current_step 等）
+            timeout: LLM 调用超时（秒）
 
         Returns:
             推理结果字典
         """
+        import concurrent.futures
+
         context = context or {}
 
         # 1. 从图谱检索相关子图
         subgraph = self._retrieve_subgraph(query, reasoning_type, context)
 
-        # 2. 构建推理 prompt
+        # 2. 数据质量预检
+        quality_warning = self._check_subgraph_quality(subgraph, query)
+        if quality_warning:
+            return {
+                "conclusion": quality_warning,
+                "confidence": 0,
+                "reasoning_chain": [],
+                "suggestions": ["请确认零件编号是否正确", "或联系管理员完善图谱数据"],
+                "risks": [],
+                "missing_info": [],
+                "subgraph_summary": subgraph.get("summary", ""),
+            }
+
+        # 3. 构建推理 prompt
         prompt = self._build_reasoning_prompt(query, reasoning_type, subgraph, context)
 
-        # 3. LLM 推理
+        # 4. LLM 推理（带超时）
         try:
-            response = self.llm.invoke(prompt)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.llm.invoke, prompt)
+                response = future.result(timeout=timeout)
             raw_text = response.content if hasattr(response, "content") else str(response)
             return self._parse_reasoning_result(raw_text, subgraph)
+        except concurrent.futures.TimeoutError:
+            return {
+                "conclusion": f"推理超时（{timeout}s），请简化查询或稍后重试",
+                "confidence": 0,
+                "reasoning_chain": [],
+                "suggestions": ["尝试更简单的查询"],
+                "risks": [],
+                "missing_info": [],
+                "subgraph_summary": subgraph.get("summary", ""),
+            }
         except Exception as e:
             return {
-                "conclusion": f"推理引擎暂时不可用: {e}",
+                "conclusion": f"推理引擎暂时不可用: {type(e).__name__}",
                 "confidence": 0,
                 "reasoning_chain": [],
                 "suggestions": ["请稍后重试", "或直接询问具体零件的替代方案"],
@@ -100,6 +129,27 @@ class GraphReasoner:
                 "missing_info": [],
                 "subgraph_summary": subgraph.get("summary", ""),
             }
+
+    def _check_subgraph_quality(self, subgraph: dict, query: str) -> str:
+        """
+        子图数据质量预检。
+        返回空字符串表示质量通过，否则返回警告信息。
+        """
+        # 空图谱
+        if not subgraph["nodes"]:
+            return "图谱中暂无相关数据，无法进行推理"
+
+        # 查询中有零件号但子图无 Part 节点
+        import re
+        part_ids_in_query = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", query)
+        part_ids_in_graph = [
+            n["id"].replace("part_", "") for n in subgraph["nodes"]
+            if n.get("type") == "Part"
+        ]
+        if part_ids_in_query and not part_ids_in_graph:
+            return f"零件 {part_ids_in_query[0]} 不在图谱中，无法推理"
+
+        return ""
 
     def _retrieve_subgraph(
         self,
@@ -130,12 +180,19 @@ class GraphReasoner:
             for part_id in part_ids:
                 part_info = self.retriever.get_part_info(part_id)
                 if part_info.get("found"):
-                    nodes_info.append({
+                    part_data = {
                         "id": f"part_{part_id}",
                         "name": part_info["part"]["name"],
                         "type": "Part",
                         "properties": part_info["part"].get("properties", {}),
-                    })
+                        "colors": part_info.get("colors", []),
+                        "categories": part_info.get("categories", []),
+                    }
+                    # 解析尺寸（从名称中提取）
+                    size = self._parse_size_from_name(part_info["part"]["name"])
+                    if size:
+                        part_data["size"] = {"width": size[0], "length": size[1]}
+                    nodes_info.append(part_data)
 
                     # 查找替代方案
                     alternatives = self.retriever.find_part_alternatives(part_id, limit=5)
@@ -314,6 +371,14 @@ class GraphReasoner:
             "risks": [],
             "missing_info": [],
         }
+
+    @staticmethod
+    def _parse_size_from_name(name: str) -> tuple[int, int] | None:
+        """从零件名称解析尺寸（如 'Brick 2x4' → (2, 4)）"""
+        match = re.search(r"(\d+)\s*[x×]\s*(\d+)", name)
+        if match:
+            return (int(match.group(1)), int(match.group(2)))
+        return None
 
     def _deduplicate_nodes(self, nodes: list[dict]) -> list[dict]:
         """去重"""

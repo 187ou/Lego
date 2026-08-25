@@ -34,6 +34,17 @@ class VisualEncoder:
         self.processor = None
         self._load_model()
 
+    @property
+    def model_loaded(self) -> bool:
+        return self.model is not None and self.processor is not None
+
+    @property
+    def actual_model_name(self) -> str:
+        """实际加载的模型名称（可能因回退而与请求的不同）"""
+        if not self.model_loaded:
+            return "none"
+        return getattr(self.model, "_name_or_path", self.model_name)
+
     def _load_model(self):
         """加载模型"""
         if self.model_name == "siglip":
@@ -76,23 +87,49 @@ class VisualEncoder:
             )
 
     def _load_lego_clip(self):
-        """加载乐高专用微调 CLIP"""
+        """加载乐高专用微调 CLIP（不可用时回退到标准 CLIP）"""
         try:
             from transformers import CLIPModel, CLIPProcessor
 
-            # Hugging Face 上的乐高微调 CLIP
             model_id = "JunkGao/clip-vit-base-patch32_lego-brick"
             self.processor = CLIPProcessor.from_pretrained(model_id)
             self.model = CLIPModel.from_pretrained(model_id).to(self.device)
             self.model.eval()
             print(f"[OK] LEGO CLIP 模型加载成功: {model_id}")
-        except ImportError:
-            raise ValueError(
-                "加载 CLIP 需要安装 transformers: pip install transformers"
-            )
         except Exception as e:
-            print(f"[WARN] LEGO CLIP 加载失败: {e}，回退到标准 CLIP")
+            print(f"[WARN] LEGO CLIP 不可用: {type(e).__name__}，回退到标准 CLIP")
             self._load_clip()
+
+    def _extract_embedding(self, outputs) -> list[float]:
+        """从模型输出中提取向量（兼容不同版本的 transformers）"""
+        import numpy as np
+        import torch
+
+        if isinstance(outputs, torch.Tensor):
+            tensor = outputs
+        elif hasattr(outputs, "cpu"):
+            tensor = outputs.cpu()
+        elif hasattr(outputs, "last_hidden_state"):
+            tensor = outputs.last_hidden_state[:, 0, :]
+        elif hasattr(outputs, "pooler_output"):
+            tensor = outputs.pooler_output
+        elif hasattr(outputs, "text_embeds"):
+            tensor = outputs.text_embeds
+        elif hasattr(outputs, "image_embeds"):
+            tensor = outputs.image_embeds
+        else:
+            tensor = outputs
+
+        if hasattr(tensor, "detach"):
+            tensor = tensor.detach()
+        if tensor.dim() > 1:
+            tensor = tensor[0]
+        if hasattr(tensor, "cpu"):
+            tensor = tensor.cpu()
+        embedding = tensor.numpy().astype(float)
+        norm = float(np.linalg.norm(embedding))
+        embedding = embedding / (norm + 1e-8)
+        return embedding.tolist()
 
     def encode_image(self, image: Union[str, bytes, Image.Image]) -> list[float]:
         """
@@ -107,7 +144,6 @@ class VisualEncoder:
         if self.model is None:
             return self._mock_embedding()
 
-        # 加载图片
         if isinstance(image, str):
             img = Image.open(image).convert("RGB")
         elif isinstance(image, bytes):
@@ -117,21 +153,11 @@ class VisualEncoder:
         else:
             raise ValueError(f"不支持的图片类型: {type(image)}")
 
-        # 编码
-        import torch
-
         inputs = self.processor(images=img, return_tensors="pt").to(self.device)
-        with torch.no_grad():
-            if self.model_name == "siglip":
-                outputs = self.model.get_image_features(**inputs)
-            else:
-                outputs = self.model.get_image_features(**inputs)
+        with __import__("torch").no_grad():
+            outputs = self.model.get_image_features(**inputs)
 
-        # 归一化
-        embedding = outputs.cpu().numpy()[0]
-        embedding = embedding / (embedding.norm() + 1e-8)
-
-        return embedding.tolist()
+        return self._extract_embedding(outputs)
 
     def encode_text(self, text: str) -> list[float]:
         """
@@ -146,19 +172,11 @@ class VisualEncoder:
         if self.model is None:
             return self._mock_embedding()
 
-        import torch
-
         inputs = self.processor(text=[text], return_tensors="pt", padding=True).to(self.device)
-        with torch.no_grad():
-            if self.model_name == "siglip":
-                outputs = self.model.get_text_features(**inputs)
-            else:
-                outputs = self.model.get_text_features(**inputs)
+        with __import__("torch").no_grad():
+            outputs = self.model.get_text_features(**inputs)
 
-        embedding = outputs.cpu().numpy()[0]
-        embedding = embedding / (embedding.norm() + 1e-8)
-
-        return embedding.tolist()
+        return self._extract_embedding(outputs)
 
     def compute_similarity(
         self,

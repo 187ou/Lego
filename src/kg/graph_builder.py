@@ -13,6 +13,7 @@
 4. 跨模态对齐（文本↔图片）
 """
 
+import os
 import re
 from typing import Optional
 
@@ -40,7 +41,7 @@ class GraphBuilder:
         从说明书页面构建图谱。
 
         Args:
-            pages: MultimodalPage 列表
+            pages: MultimodalPage 列表 或 Document 列表（自动适配）
             set_id: 套装编号
 
         Returns:
@@ -67,11 +68,23 @@ class GraphBuilder:
         return stats
 
     def _process_page(self, page, set_id: str) -> dict:
-        """处理单个页面"""
+        """
+        处理单个页面。
+        支持 MultimodalPage 和 LangChain Document 两种格式。
+        """
         stats = {"nodes": 0, "relations": 0}
 
-        # 提取步骤号
-        step_number = page.page_number
+        # 兼容 MultimodalPage 和 Document
+        if hasattr(page, "page_number"):
+            step_number = page.page_number
+            text_content = page.text_content or ""
+        else:
+            # LangChain Document
+            step_number = page.metadata.get("step_number", 0)
+            text_content = page.page_content or ""
+
+        if not step_number:
+            return stats
 
         # 创建步骤节点
         step_node = GraphNode(
@@ -82,7 +95,7 @@ class GraphBuilder:
                 "step_number": step_number,
                 "set_id": set_id,
             },
-            text_description=page.text_content,
+            text_description=text_content,
         )
         self.store.create_node(step_node)
         stats["nodes"] += 1
@@ -99,7 +112,7 @@ class GraphBuilder:
             stats["relations"] += 1
 
         # 提取零件实体
-        parts = self._extract_parts(page.text_content)
+        parts = self._extract_parts(text_content)
 
         for part in parts:
             # 创建零件节点
@@ -153,7 +166,8 @@ class GraphBuilder:
                 stats["relations"] += 1
 
         # 如果有图片，创建图片节点和跨模态关系
-        if page.full_image:
+        full_image = getattr(page, "full_image", None)
+        if full_image:
             image_node = GraphNode(
                 node_type=NodeType.IMAGE,
                 node_id=f"set_{set_id}_page_{step_number}_img",
@@ -529,6 +543,14 @@ def build_from_mock_manual(set_id: str = "10295") -> dict:
             if part_key not in all_parts:
                 all_parts.add(part_key)
 
+                # 解析尺寸
+                import re
+                size_match = re.search(r"(\d+)\s*[x×]\s*(\d+)", part["name"])
+                size_props = {}
+                if size_match:
+                    size_props["width"] = int(size_match.group(1))
+                    size_props["length"] = int(size_match.group(2))
+
                 # 创建零件节点
                 part_node = GraphNode(
                     node_type=NodeType.PART,
@@ -537,6 +559,7 @@ def build_from_mock_manual(set_id: str = "10295") -> dict:
                     properties={
                         "part_id": part["part_id"],
                         "category": part.get("category", ""),
+                        **size_props,
                     },
                 )
                 builder.store.create_node(part_node)
@@ -582,6 +605,9 @@ def build_from_mock_manual(set_id: str = "10295") -> dict:
     # 3. 建立零件替代关系（基于尺寸相似度自动计算）
     _auto_build_alternatives(builder, stats)
 
+    # 4. 为零件生成合成图片（跨模态数据）
+    _generate_part_images(builder, set_id)
+
     print(f"[OK] 从 Mock 说明书构建图谱完成: {stats['nodes']} 节点, {stats['relations']} 关系")
     return stats
 
@@ -590,26 +616,32 @@ def _auto_build_alternatives(builder: GraphBuilder, stats: dict):
     """
     自动计算零件替代关系。
 
-    规则：
-    - 同类型 + 同尺寸 → confidence=0.95
-    - 同类型 + 尺寸差一级 → confidence=0.7
-    - 不同类型 + 同尺寸 → confidence=0.4
-    """
-    # 常见零件尺寸映射
-    part_sizes = {
-        "3001": (2, 4), "3002": (2, 3), "3003": (2, 2), "3004": (1, 2),
-        "3005": (1, 1), "3008": (1, 8), "3009": (1, 6), "3010": (1, 4),
-        "3622": (1, 3), "3020": (2, 4), "3021": (2, 3), "3022": (2, 2),
-        "3023": (1, 2), "3024": (1, 1), "3069": (1, 2), "3070": (1, 1),
-        "3039": (2, 2), "3040": (2, 1),
-    }
+    基于图谱中已有的 Part 节点和 _lookup_part_name 推断类型与尺寸。
+    不使用硬编码零件表，只处理图谱中实际存在的零件。
 
-    # 零件类型前缀
+    规则（基于 LEGO 几何兼容性）：
+    - 同类型 + 同尺寸 → confidence=0.95（完全可替代）
+    - 同类型 + 尺寸差一级 → confidence=0.6（可能替代，但长度不同）
+    - 不同类型 → 不建立替代关系（高度不同，无法直接替代）
+    """
+    # 从图谱中获取所有 Part 节点的 part_id
+    store = builder.store
+    graph_stats = store.get_stats()
+    if not graph_stats.get("available"):
+        return
+
+    # 收集图谱中的零件 ID（通过 part_ 前缀的 node_id）
+    part_ids = _get_part_ids_from_store(store)
+    if len(part_ids) < 2:
+        return
+
+    # 零件类型查找表（用于分类）
     type_prefixes = {
-        "Brick": ["3001", "3002", "3003", "3004", "3005", "3008", "3009", "3010", "3622"],
-        "Plate": ["3020", "3021", "3022", "3023", "3024", "3031", "3034"],
+        "Brick": ["3001", "3002", "3003", "3004", "3005", "3008", "3009", "3010", "3622",
+                    "3006", "3007"],
+        "Plate": ["3020", "3021", "3022", "3023", "3024", "3031", "3034", "3795", "3032"],
         "Tile": ["3069", "3070", "3068"],
-        "Slope": ["3039", "3040", "3048"],
+        "Slope": ["3039", "3040", "3048", "30414"],
     }
 
     def _get_type(part_id: str) -> str:
@@ -618,22 +650,37 @@ def _auto_build_alternatives(builder: GraphBuilder, stats: dict):
                 return type_name
         return "Other"
 
-    registered_parts = list(part_sizes.keys())
+    def _get_size(part_id: str) -> tuple[int, int] | None:
+        """从零件名称推断尺寸（如 'Brick 2x4' → (2, 4)）"""
+        import re
+        name = builder._lookup_part_name(part_id)
+        match = re.search(r"(\d+)\s*[x×]\s*(\d+)", name)
+        if match:
+            return (int(match.group(1)), int(match.group(2)))
+        return None
 
-    for i, part_id_a in enumerate(registered_parts):
-        size_a = part_sizes[part_id_a]
+    for i, part_id_a in enumerate(part_ids):
         type_a = _get_type(part_id_a)
+        size_a = _get_size(part_id_a)
+        if size_a is None:
+            continue
 
-        for part_id_b in registered_parts[i + 1:]:
-            size_b = part_sizes[part_id_b]
+        for part_id_b in part_ids[i + 1:]:
             type_b = _get_type(part_id_b)
+            size_b = _get_size(part_id_b)
+            if size_b is None:
+                continue
 
-            if type_a == type_b and size_a == size_b:
+            # 不同类型不建立替代关系（高度不同，无法直接替代）
+            if type_a != type_b:
+                continue
+
+            if size_a == size_b:
                 confidence = 0.95
-            elif type_a == type_b and (abs(size_a[0] - size_b[0]) <= 1 and abs(size_a[1] - size_b[1]) <= 1):
-                confidence = 0.7
-            elif type_a != type_b and size_a == size_b:
-                confidence = 0.4
+            elif (abs(size_a[0] - size_b[0]) <= 1 and abs(size_a[1] - size_b[1]) <= 1
+                  and (size_a[0] == size_b[0] or size_a[1] == size_b[1])):
+                # 只有一维相同（如 2x4 和 2x3），另一维差1
+                confidence = 0.6
             else:
                 continue
 
@@ -643,8 +690,37 @@ def _auto_build_alternatives(builder: GraphBuilder, stats: dict):
                 target_id=f"part_{part_id_b}",
                 confidence=confidence,
             )
-            builder.store.create_relation(rel)
+            store.create_relation(rel)
             stats["relations"] += 1
+
+
+def _get_part_ids_from_store(store) -> list[str]:
+    """从图谱存储中提取所有 Part 节点的 part_id"""
+    part_ids = []
+
+    # MockGraphStore: 从内存读取
+    if hasattr(store, "_nodes"):
+        for node_id, node in store._nodes.items():
+            if node.node_type == NodeType.PART:
+                pid = node.properties.get("part_id", node_id.replace("part_", ""))
+                part_ids.append(pid)
+        return part_ids
+
+    # Neo4jGraphStore: 通过 Cypher 查询
+    stats = store.get_stats()
+    if stats.get("available") and hasattr(store, "_run_query"):
+        try:
+            rows = store._run_query(
+                "MATCH (n:Part) RETURN n.part_id as part_id, n.node_id as node_id"
+            )
+            for r in rows:
+                pid = r.get("part_id") or r.get("node_id", "").replace("part_", "")
+                if pid:
+                    part_ids.append(pid)
+        except Exception:
+            pass
+
+    return part_ids
 
 
 def init_default_graph() -> dict:
@@ -714,5 +790,88 @@ def init_default_graph() -> dict:
     except Exception as e:
         print(f"[WARN] 导入常见零件失败: {e}")
 
+    # 5. 为常见零件生成合成图片
+    try:
+        _generate_part_images(builder, set_id="common")
+    except Exception as e:
+        print(f"[WARN] 生成零件图片失败: {e}")
+
     print(f"[OK] 默认知识图谱初始化完成: {stats['nodes']} 节点, {stats['relations']} 关系")
     return stats
+
+
+def _generate_part_images(builder: GraphBuilder, set_id: str):
+    """
+    为图谱中的零件生成合成图片，建立跨模态关联。
+
+    对每个 Part 节点：
+    1. 生成合成图片（Pillow 绘制）
+    2. 创建 Image 节点
+    3. 建立 CROSS_MODAL 关系
+    """
+    try:
+        from src.kg.image_generator import generate_part_image, parse_size_from_name
+    except ImportError:
+        return
+
+    part_ids = _get_part_ids_from_store(builder.store)
+    if not part_ids:
+        return
+
+    image_dir = os.path.join(os.getcwd(), "data", "images", set_id)
+    os.makedirs(image_dir, exist_ok=True)
+
+    for part_id in part_ids:
+        node_id = f"part_{part_id}"
+        node = builder.store.get_node(node_id)
+        if not node:
+            continue
+
+        # 解析尺寸
+        size = parse_size_from_name(node.name)
+        if not size:
+            size = (2, 4)  # 默认尺寸
+
+        # 获取颜色
+        neighbors = builder.store.get_neighbors(node_id, limit=5)
+        color = "Red"
+        for n in neighbors:
+            if n.get("relation") == RelationType.HAS_COLOR.value:
+                color = n.get("name", "Red")
+                break
+
+        # 生成图片
+        try:
+            img_bytes = generate_part_image(
+                part_name=node.name,
+                width=size[0],
+                length=size[1],
+                color=color,
+            )
+
+            # 保存图片
+            img_filename = f"{part_id}_{color.lower()}.png"
+            img_path = os.path.join(image_dir, img_filename)
+            with open(img_path, "wb") as f:
+                f.write(img_bytes)
+
+            # 创建 Image 节点
+            image_node = GraphNode(
+                node_type=NodeType.IMAGE,
+                node_id=f"{node_id}_img",
+                name=f"{node.name} ({color})",
+                image_url=img_path,
+            )
+            builder.store.create_node(image_node)
+
+            # 建立 CROSS_MODAL 关系
+            cm_rel = GraphRelation(
+                relation_type=RelationType.CROSS_MODAL,
+                source_id=node_id,
+                target_id=image_node.node_id,
+                confidence=0.9,
+            )
+            builder.store.create_relation(cm_rel)
+
+        except Exception as e:
+            print(f"[WARN] 生成零件 {part_id} 图片失败: {e}")

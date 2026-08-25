@@ -38,7 +38,12 @@ def generate_build_model(set_id: str, set_name: str, total_steps: int) -> dict[s
 
 
 def _try_get_from_graph(set_id: str, set_name: str) -> dict[str, Any] | None:
-    """尝试从知识图谱获取拼装数据"""
+    """
+    尝试从知识图谱获取拼装数据。
+
+    遍历策略：从步骤 1 开始连续查询，最多查 200 步或遇到空步骤停止。
+    不依赖 total_parts（那是零件数，不是步骤数）。
+    """
     try:
         from src.kg.graph_retriever import get_graph_retriever
         retriever = get_graph_retriever()
@@ -48,22 +53,35 @@ def _try_get_from_graph(set_id: str, set_name: str) -> dict[str, Any] | None:
             return None
 
         steps = []
-        for step_num in range(1, min(overview.get("total_parts", 0) + 1, 100)):
+        max_steps = 200
+
+        for step_num in range(1, max_steps + 1):
             step_info = retriever.get_step_info(set_id, step_num)
             if not step_info.get("found"):
                 break
 
             bricks = []
             for i, part in enumerate(step_info.get("parts", [])):
-                color = random.choice(LEGO_COLORS)
+                # 从图谱获取真实颜色，而非随机
+                color_name = _extract_part_color(part)
+                color_hex = _color_name_to_hex(color_name)
+
+                # 从零件名称解析尺寸
+                size = _parse_size_from_name(part.get("name", ""))
+
+                # 计算位置（简单堆叠，避免重叠）
+                x_pos = (i * 3) % 8  # 在底板范围内排列
+                z_pos = (i * 3) // 8
+                y_pos = step_num - 1
+
                 bricks.append({
                     "id": f"step{step_num}-brick{i}",
                     "partId": part.get("part_id", f"300{i}"),
                     "name": part.get("name", f"Brick {i+1}"),
-                    "color": color["hex"],
-                    "colorName": color["name"],
-                    "size": {"x": 2, "y": 1, "z": 2},
-                    "position": {"x": i * 2, "y": step_num - 1, "z": 0},
+                    "color": color_hex,
+                    "colorName": color_name or "Red",
+                    "size": size,
+                    "position": {"x": x_pos, "y": y_pos, "z": z_pos},
                 })
 
             if bricks:
@@ -81,28 +99,75 @@ def _try_get_from_graph(set_id: str, set_name: str) -> dict[str, Any] | None:
             "setName": set_name,
             "totalSteps": len(steps),
             "totalBricks": sum(len(s["bricksToAdd"]) for s in steps),
-            "basePlate": {"width": 8, "length": 8},
+            "basePlate": {"width": 16, "length": 16},
             "steps": steps,
+            "source": "graph",
         }
     except Exception as e:
         print(f"[WARN] 从图谱获取数据失败: {e}")
         return None
 
 
+def _extract_part_color(part: dict) -> str:
+    """从零件信息中提取颜色"""
+    # 检查颜色字段
+    if part.get("color"):
+        return part["color"]
+    # 检查颜色关系
+    for rel in part.get("relations", []):
+        if rel.get("relation") == "HAS_COLOR":
+            return rel.get("target_name", "")
+    return ""
+
+
+def _color_name_to_hex(color_name: str) -> str:
+    """颜色名称转十六进制"""
+    if not color_name:
+        return "#808080"
+
+    for c in LEGO_COLORS:
+        if c["name"].lower() == color_name.lower():
+            return c["hex"]
+
+    return "#808080"
+
+
+def _parse_size_from_name(name: str) -> dict:
+    """从零件名称解析尺寸"""
+    import re
+    match = re.search(r"(\d+)\s*[x×]\s*(\d+)", name)
+    if match:
+        return {"x": int(match.group(1)), "y": 1, "z": int(match.group(2))}
+    return {"x": 2, "y": 1, "z": 2}
+
+
 def _generate_mock_model(set_id: str, set_name: str, total_steps: int) -> dict[str, Any]:
-    """生成模拟拼装数据"""
+    """
+    生成模拟拼装数据。
+
+    改进：
+    - 位置在底板范围内排列，避免重叠
+    - 底板尺寸随步骤数自适应
+    """
+    base_width = max(8, min(32, total_steps // 2))
+    base_length = base_width
+
     steps = []
     brick_id_counter = 0
 
     for step_num in range(1, total_steps + 1):
         bricks = []
-        # 每步 1-3 个积木
         num_bricks = min(random.randint(1, 3), 3)
 
         for i in range(num_bricks):
             color = random.choice(LEGO_COLORS)
             size_x = random.choice([1, 2, 2, 4])
             size_z = random.choice([1, 2, 2, 4])
+
+            # 在底板范围内排列
+            x_pos = (i * 3) % max(1, base_width - size_x)
+            z_pos = ((i * 3) // max(1, base_width - size_x)) % max(1, base_length - size_z)
+            y_pos = step_num - 1
 
             bricks.append({
                 "id": f"brick-{brick_id_counter}",
@@ -111,11 +176,7 @@ def _generate_mock_model(set_id: str, set_name: str, total_steps: int) -> dict[s
                 "color": color["hex"],
                 "colorName": color["name"],
                 "size": {"x": size_x, "y": 1, "z": size_z},
-                "position": {
-                    "x": i * 2,
-                    "y": step_num - 1,
-                    "z": 0,
-                },
+                "position": {"x": x_pos, "y": y_pos, "z": z_pos},
             })
             brick_id_counter += 1
 
@@ -130,8 +191,9 @@ def _generate_mock_model(set_id: str, set_name: str, total_steps: int) -> dict[s
         "setName": set_name,
         "totalSteps": total_steps,
         "totalBricks": brick_id_counter,
-        "basePlate": {"width": 8, "length": 8},
+        "basePlate": {"width": base_width, "length": base_length},
         "steps": steps,
+        "source": "mock",
     }
 
 

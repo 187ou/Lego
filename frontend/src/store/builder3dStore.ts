@@ -27,6 +27,10 @@ interface Builder3dState {
   isLoading: boolean
   // 是否使用真实数据
   useRealData: boolean
+  // 数据来源: "graph" | "mock" | "api"
+  dataSource: string
+  // 加载错误信息
+  loadError: string | null
 
   // Actions
   setModel: (model: BuildModel) => void
@@ -53,6 +57,8 @@ export const useBuilder3dStore = create<Builder3dState>((set, get) => ({
   soundEnabled: true,
   isLoading: false,
   useRealData: false,
+  dataSource: "mock",
+  loadError: null,
 
   setModel: (model) =>
     set({
@@ -61,6 +67,8 @@ export const useBuilder3dStore = create<Builder3dState>((set, get) => ({
       selectedBrick: null,
       explodeMode: false,
       isPlaying: false,
+      dataSource: (model as any).source || "mock",
+      loadError: null,
     }),
 
   setCurrentStep: (step) => {
@@ -110,24 +118,31 @@ export const useBuilder3dStore = create<Builder3dState>((set, get) => ({
     }),
 
   loadFromAPI: async (setId: string, setName?: string, totalSteps?: number) => {
-    set({ isLoading: true })
+    set({ isLoading: true, loadError: null })
     try {
       const apiData = await getBuildModel(setId, setName, totalSteps)
       const model = convertAPIToModel(apiData)
+      const source = (apiData as any).source || "api"
       set({
         model,
         currentStep: 1,
         selectedBrick: null,
         explodeMode: false,
         isPlaying: false,
-        useRealData: true,
+        useRealData: source === "graph",
+        dataSource: source,
         isLoading: false,
+        loadError: null,
       })
-    } catch (error) {
+    } catch (error: any) {
       console.error("加载拼装模型失败:", error)
-      set({ isLoading: false })
-      // 失败时使用 mock 数据
-      set({ model: mockBuildModel, useRealData: false })
+      set({
+        isLoading: false,
+        useRealData: false,
+        dataSource: "mock",
+        loadError: error?.message || "加载失败，已切换为模拟数据",
+      })
+      set({ model: mockBuildModel })
     }
   },
 }))
