@@ -13,7 +13,7 @@ import { useUIStore } from "./store/uiStore"
 const App: React.FC = () => {
   const loadConversations = useChatStore((s) => s.loadConversations)
   const createNewConversation = useChatStore((s) => s.createNewConversation)
-  const currentConversationId = useChatStore((s) => s.currentConversationId)
+  const switchConversation = useChatStore((s) => s.switchConversation)
   const theme = useSettingsStore((s) => s.theme)
   const historyOpen = useUIStore((s) => s.historyOpen)
   const setHistoryOpen = useUIStore((s) => s.setHistoryOpen)
@@ -23,11 +23,15 @@ const App: React.FC = () => {
     // 应用主题
     document.documentElement.classList.toggle("dark", theme === "dark")
 
-    // 加载对话列表
+    // 加载对话列表，然后用 get() 获取最新状态
     loadConversations().then(() => {
-      // 如果没有对话，创建一个
-      if (!currentConversationId) {
+      const { conversations, currentConversationId } = useChatStore.getState()
+      if (conversations.length === 0) {
+        // 没有任何对话，创建新的
         createNewConversation()
+      } else if (!currentConversationId || !conversations.find((c) => c.id === currentConversationId)) {
+        // 当前对话不存在或已被删除，切换到最新的对话
+        switchConversation(conversations[0].id)
       }
     })
   }, [])

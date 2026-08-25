@@ -249,16 +249,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
                 switch (event) {
                   case "thinking":
+                    // 后端发送的思考步骤，直接追加
+                    thinkingSteps = [...thinkingSteps, data.message]
+                    set({ currentThinking: thinkingSteps })
+                    break
                   case "status":
+                    // 兼容旧格式
                     thinkingSteps = [...thinkingSteps, data.message]
                     set({ currentThinking: thinkingSteps })
                     break
                   case "tool_call":
-                    thinkingSteps = [...thinkingSteps, `🔧 调用工具: ${data.name}`]
-                    set({ currentThinking: thinkingSteps })
+                    // 工具调用信息
                     toolCalls = [...toolCalls, data]
                     break
                   case "tool_complete":
+                    // 工具完成（旧格式兼容）
                     thinkingSteps = [
                       ...thinkingSteps,
                       `✅ 工具执行完成: ${data.tools.join(", ")}`,
@@ -266,6 +271,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     set({ currentThinking: thinkingSteps })
                     break
                   case "generating":
+                    // 开始生成回复
                     thinkingSteps = [...thinkingSteps, "✍️ 正在生成回复..."]
                     set({ currentThinking: thinkingSteps })
                     break
