@@ -254,4 +254,46 @@ export async function searchDocuments(
   return res.json()
 }
 
+// ===== 3D 拼装 =====
+
+export interface Brick3D {
+  id: string
+  partId: string
+  name: string
+  color: string
+  colorName: string
+  size: { x: number; y: number; z: number }
+  position: { x: number; y: number; z: number }
+}
+
+export interface BuildStep3D {
+  stepNumber: number
+  description: string
+  bricksToAdd: Brick3D[]
+  bricksHighlight?: string[]
+}
+
+export interface BuildModel3D {
+  setId: string
+  setName: string
+  totalSteps: number
+  totalBricks: number
+  steps: BuildStep3D[]
+  basePlate: { width: number; length: number }
+}
+
+export async function getBuildModel(
+  setId: string,
+  setName?: string,
+  totalSteps?: number,
+): Promise<BuildModel3D> {
+  const params = new URLSearchParams()
+  if (setName) params.set("set_name", setName)
+  if (totalSteps) params.set("total_steps", String(totalSteps))
+
+  const res = await fetch(`${API_BASE}/api/builder3d/set/${setId}?${params}`)
+  if (!res.ok) throw new Error("获取拼装模型失败")
+  return res.json()
+}
+
 export { API_BASE }

@@ -1550,6 +1550,34 @@ async def retrieve_context(
         raise HTTPException(status_code=500, detail=f"构建失败: {str(e)}")
 
 
+# ===== 3D 拼装端点 =====
+
+
+@app.get("/api/builder3d/set/{set_id}")
+async def get_build_model(set_id: str, set_name: str = "", total_steps: int = 30):
+    """
+    获取套装的 3D 拼装模型数据。
+
+    返回包含所有步骤和积木信息的完整模型，
+    前端用此数据渲染 3D 拼装动画。
+    """
+    try:
+        from src.builder3d.data_generator import get_build_model
+        model = get_build_model(set_id, set_name, total_steps)
+        return model
+    except Exception as e:
+        logger.error(f"获取拼装模型失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取拼装模型失败: {str(e)}")
+
+
+@app.post("/api/builder3d/clear-cache")
+async def clear_builder_cache():
+    """清除拼装模型缓存"""
+    from src.builder3d.data_generator import clear_cache
+    clear_cache()
+    return {"success": True}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
