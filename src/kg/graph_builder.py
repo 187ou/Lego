@@ -453,3 +453,266 @@ def build_from_manual(pages: list, set_id: str) -> dict:
     """
     builder = GraphBuilder()
     return builder.build_from_manual(pages, set_id)
+
+
+# =========================================================================
+# 从 Mock 说明书数据构建图谱
+# =========================================================================
+
+def build_from_mock_manual(set_id: str = "10295") -> dict:
+    """
+    从 Mock 说明书数据构建图谱。
+
+    处理流程：
+    1. 调用 create_mock_manual() 获取步骤文档
+    2. 创建 Set 节点
+    3. 遍历每个步骤 → 创建 Step 节点 + FOLLOWS 关系
+    4. 正则提取零件 → 创建 Part 节点 + USES 关系 + CONTAINS 关系
+    5. 提取颜色 → 创建 Color 节点 + HAS_COLOR 关系
+    6. 建立零件替代关系（基于尺寸相似度自动计算）
+    """
+    from src.rag.pdf_loader import create_mock_manual
+
+    builder = GraphBuilder()
+    documents = create_mock_manual(set_id=set_id)
+
+    stats = {"nodes": 0, "relations": 0}
+
+    # 1. 创建套装节点
+    set_node = GraphNode(
+        node_type=NodeType.SET,
+        node_id=f"set_{set_id}",
+        name=f"Set {set_id}",
+        properties={"set_id": set_id},
+    )
+    builder.store.create_node(set_node)
+    stats["nodes"] += 1
+
+    # 2. 遍历每个步骤文档
+    prev_step_id = None
+    all_parts = set()
+
+    for doc in documents:
+        step_number = doc.metadata.get("step_number", 0)
+        if not step_number:
+            continue
+
+        # 创建步骤节点
+        step_node = GraphNode(
+            node_type=NodeType.STEP,
+            node_id=f"set_{set_id}_step_{step_number}",
+            name=f"步骤 {step_number}",
+            properties={
+                "step_number": step_number,
+                "set_id": set_id,
+            },
+            text_description=doc.page_content,
+        )
+        builder.store.create_node(step_node)
+        stats["nodes"] += 1
+
+        # 创建步骤顺序关系
+        if prev_step_id:
+            rel = GraphRelation(
+                relation_type=RelationType.FOLLOWS,
+                source_id=prev_step_id,
+                target_id=step_node.node_id,
+            )
+            builder.store.create_relation(rel)
+            stats["relations"] += 1
+        prev_step_id = step_node.node_id
+
+        # 提取零件
+        parts = builder._extract_parts(doc.page_content)
+        for part in parts:
+            part_key = f"{part['part_id']}_{part.get('color', '')}"
+            if part_key not in all_parts:
+                all_parts.add(part_key)
+
+                # 创建零件节点
+                part_node = GraphNode(
+                    node_type=NodeType.PART,
+                    node_id=f"part_{part['part_id']}",
+                    name=part["name"],
+                    properties={
+                        "part_id": part["part_id"],
+                        "category": part.get("category", ""),
+                    },
+                )
+                builder.store.create_node(part_node)
+                stats["nodes"] += 1
+
+                # 创建颜色节点和关系
+                if part.get("color"):
+                    color_node = GraphNode(
+                        node_type=NodeType.COLOR,
+                        node_id=f"color_{part['color']}",
+                        name=part["color"],
+                    )
+                    builder.store.create_node(color_node)
+                    stats["nodes"] += 1
+
+                    color_rel = GraphRelation(
+                        relation_type=RelationType.HAS_COLOR,
+                        source_id=part_node.node_id,
+                        target_id=color_node.node_id,
+                    )
+                    builder.store.create_relation(color_rel)
+                    stats["relations"] += 1
+
+            # 创建 USES 关系
+            uses_rel = GraphRelation(
+                relation_type=RelationType.USES,
+                source_id=step_node.node_id,
+                target_id=f"part_{part['part_id']}",
+                properties={"quantity": part.get("quantity", 1)},
+            )
+            builder.store.create_relation(uses_rel)
+            stats["relations"] += 1
+
+            # 创建 CONTAINS 关系
+            contains_rel = GraphRelation(
+                relation_type=RelationType.CONTAINS,
+                source_id=f"set_{set_id}",
+                target_id=f"part_{part['part_id']}",
+            )
+            builder.store.create_relation(contains_rel)
+            stats["relations"] += 1
+
+    # 3. 建立零件替代关系（基于尺寸相似度自动计算）
+    _auto_build_alternatives(builder, stats)
+
+    print(f"[OK] 从 Mock 说明书构建图谱完成: {stats['nodes']} 节点, {stats['relations']} 关系")
+    return stats
+
+
+def _auto_build_alternatives(builder: GraphBuilder, stats: dict):
+    """
+    自动计算零件替代关系。
+
+    规则：
+    - 同类型 + 同尺寸 → confidence=0.95
+    - 同类型 + 尺寸差一级 → confidence=0.7
+    - 不同类型 + 同尺寸 → confidence=0.4
+    """
+    # 常见零件尺寸映射
+    part_sizes = {
+        "3001": (2, 4), "3002": (2, 3), "3003": (2, 2), "3004": (1, 2),
+        "3005": (1, 1), "3008": (1, 8), "3009": (1, 6), "3010": (1, 4),
+        "3622": (1, 3), "3020": (2, 4), "3021": (2, 3), "3022": (2, 2),
+        "3023": (1, 2), "3024": (1, 1), "3069": (1, 2), "3070": (1, 1),
+        "3039": (2, 2), "3040": (2, 1),
+    }
+
+    # 零件类型前缀
+    type_prefixes = {
+        "Brick": ["3001", "3002", "3003", "3004", "3005", "3008", "3009", "3010", "3622"],
+        "Plate": ["3020", "3021", "3022", "3023", "3024", "3031", "3034"],
+        "Tile": ["3069", "3070", "3068"],
+        "Slope": ["3039", "3040", "3048"],
+    }
+
+    def _get_type(part_id: str) -> str:
+        for type_name, prefixes in type_prefixes.items():
+            if part_id in prefixes:
+                return type_name
+        return "Other"
+
+    registered_parts = list(part_sizes.keys())
+
+    for i, part_id_a in enumerate(registered_parts):
+        size_a = part_sizes[part_id_a]
+        type_a = _get_type(part_id_a)
+
+        for part_id_b in registered_parts[i + 1:]:
+            size_b = part_sizes[part_id_b]
+            type_b = _get_type(part_id_b)
+
+            if type_a == type_b and size_a == size_b:
+                confidence = 0.95
+            elif type_a == type_b and (abs(size_a[0] - size_b[0]) <= 1 and abs(size_a[1] - size_b[1]) <= 1):
+                confidence = 0.7
+            elif type_a != type_b and size_a == size_b:
+                confidence = 0.4
+            else:
+                continue
+
+            rel = GraphRelation(
+                relation_type=RelationType.CAN_REPLACE,
+                source_id=f"part_{part_id_a}",
+                target_id=f"part_{part_id_b}",
+                confidence=confidence,
+            )
+            builder.store.create_relation(rel)
+            stats["relations"] += 1
+
+
+def init_default_graph() -> dict:
+    """
+    初始化默认图谱数据。
+
+    从 Mock 说明书 + 常见零件数据库构建完整图谱。
+    在服务启动时调用一次。
+    幂等：如果图谱已有数据则跳过。
+
+    Returns:
+        构建统计
+    """
+    print("[INFO] 初始化默认知识图谱...")
+
+    # 检查是否已有数据（幂等）
+    try:
+        from src.kg.graph_store import get_graph_store
+        store = get_graph_store()
+        existing_stats = store.get_stats()
+        if existing_stats.get("total_nodes", 0) > 0:
+            print(f"[INFO] 图谱已有 {existing_stats['total_nodes']} 个节点，跳过初始化")
+            return existing_stats
+    except Exception:
+        pass
+
+    # 1. 从 Mock 说明书构建
+    stats = build_from_mock_manual(set_id="10295")
+
+    # 2. 导入常见零件
+    try:
+        from src.vision.part_recognizer import get_part_recognizer
+        recognizer = get_part_recognizer()
+        builder = GraphBuilder()
+
+        common_parts = [
+            {"part_id": "3001", "name": "Brick 2x4", "category": "Brick"},
+            {"part_id": "3002", "name": "Brick 2x3", "category": "Brick"},
+            {"part_id": "3003", "name": "Brick 2x2", "category": "Brick"},
+            {"part_id": "3005", "name": "Brick 1x1", "category": "Brick"},
+            {"part_id": "3010", "name": "Brick 1x4", "category": "Brick"},
+            {"part_id": "3020", "name": "Plate 2x4", "category": "Plate"},
+            {"part_id": "3023", "name": "Plate 1x2", "category": "Plate"},
+            {"part_id": "3622", "name": "Brick 1x3", "category": "Brick"},
+            {"part_id": "3069", "name": "Tile 1x2", "category": "Tile"},
+            {"part_id": "3070", "name": "Tile 1x1", "category": "Tile"},
+            {"part_id": "3040", "name": "Slope 45° 2x1", "category": "Slope"},
+            {"part_id": "3039", "name": "Slope 45° 2x2", "category": "Slope"},
+        ]
+
+        for part in common_parts:
+            part_node = GraphNode(
+                node_type=NodeType.PART,
+                node_id=f"part_{part['part_id']}",
+                name=part["name"],
+                properties={
+                    "part_id": part["part_id"],
+                    "category": part["category"],
+                },
+            )
+            builder.store.create_node(part_node)
+            stats["nodes"] += 1
+
+        # 重新计算替代关系
+        _auto_build_alternatives(builder, stats)
+
+    except Exception as e:
+        print(f"[WARN] 导入常见零件失败: {e}")
+
+    print(f"[OK] 默认知识图谱初始化完成: {stats['nodes']} 节点, {stats['relations']} 关系")
+    return stats

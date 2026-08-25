@@ -192,13 +192,15 @@ class GraphRetriever:
         self,
         query: str,
         modality: str = "text",
+        limit: int = 5,
     ) -> list[dict]:
         """
         跨模态搜索。
 
         Args:
-            query: 查询（文本或图片 ID）
+            query: 查询（文本或图片数据）
             modality: 查询模态（"text" 或 "image"）
+            limit: 返回数量
 
         Returns:
             匹配结果
@@ -206,12 +208,95 @@ class GraphRetriever:
         results = []
 
         if modality == "text":
-            # 文本 → 查找相关的图片节点
-            # 简化实现：遍历所有图片节点，匹配描述
-            pass
+            results = self._text_to_image_search(query, limit)
         elif modality == "image":
-            # 图片 → 查找相关的文本描述
-            pass
+            results = self._image_to_text_search(query, limit)
+
+        return results
+
+    def _text_to_image_search(self, text_query: str, limit: int) -> list[dict]:
+        """
+        文本 → 图片：从文本中提取零件号，查找关联的图片节点。
+
+        策略：
+        1. 提取零件号 → 查找 CROSS_MODAL / HAS_IMAGE 关系的图片节点
+        2. 提取步骤号 → 查找步骤关联的图片
+        3. 关键词匹配图片节点的 text_description
+        """
+        import re
+
+        results = []
+        seen_ids = set()
+
+        # 1. 提取零件号，查找跨模态关联
+        part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", text_query)
+        for part_id in part_ids:
+            node_id = f"part_{part_id}"
+            neighbors = self.store.get_neighbors(node_id, limit=10)
+            for n in neighbors:
+                n_id = n.get("node_id", "")
+                if n.get("relation") in (RelationType.HAS_IMAGE.value, RelationType.CROSS_MODAL.value):
+                    if n_id not in seen_ids:
+                        seen_ids.add(n_id)
+                        results.append({
+                            "type": "cross_modal_text_to_image",
+                            "match": "part_relation",
+                            "source": node_id,
+                            "target": n_id,
+                            "target_name": n.get("name", ""),
+                            "relation": n.get("relation", ""),
+                            "score": 0.85,
+                        })
+
+        # 2. 提取步骤号，查找步骤关联的图片
+        step_match = re.search(r"第?\s*(\d+)\s*步", text_query)
+        if step_match:
+            step_number = int(step_match.group(1))
+            # 从文本描述中推断 set_id（如果上下文有）
+            set_id = "10295"
+            step_node_id = f"set_{set_id}_step_{step_number}"
+            neighbors = self.store.get_neighbors(step_node_id, limit=10)
+            for n in neighbors:
+                n_id = n.get("node_id", "")
+                if "img" in n_id or n.get("relation") == RelationType.HAS_IMAGE.value:
+                    if n_id not in seen_ids:
+                        seen_ids.add(n_id)
+                        results.append({
+                            "type": "cross_modal_text_to_image",
+                            "match": "step_relation",
+                            "source": step_node_id,
+                            "target": n_id,
+                            "target_name": n.get("name", ""),
+                            "relation": n.get("relation", ""),
+                            "score": 0.8,
+                        })
+
+        return results[:limit]
+
+    def _image_to_text_search(self, image_data, limit: int) -> list[dict]:
+        """
+        图片 → 文本：调用多模态向量存储进行图搜文。
+
+        Args:
+            image_data: 图片数据（bytes 或路径）
+        """
+        results = []
+
+        try:
+            from src.rag.multimodal_store import get_multimodal_store
+            store = get_multimodal_store()
+            img_results = store.search_by_image(image_data, top_k=limit)
+
+            for r in img_results:
+                results.append({
+                    "type": "cross_modal_image_to_text",
+                    "content": r.get("content", ""),
+                    "score": r.get("score", 0.5),
+                    "metadata": r.get("metadata", {}),
+                    "image": r.get("image"),
+                })
+        except Exception as e:
+            print(f"[WARN] 图搜文失败: {e}")
 
         return results
 

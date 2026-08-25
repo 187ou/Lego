@@ -45,3 +45,10 @@ class AgentState(TypedDict):
 
     # 心理安抚消息队列（旁路输出）
     encouragement_messages: list[str]
+
+    # ===== 图谱推理相关 =====
+    # 图谱推理结果（LLM 驱动的深度推理）
+    graph_reasoning_result: dict[str, Any]
+
+    # 是否需要图谱深度推理
+    needs_graph_reasoning: bool

@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LEGO-Mate API", version="2.0.0")
+app = FastAPI(title="LEGO-Mate API", version="2.1.0")
 
 # CORS 配置（允许前端访问）
 app.add_middleware(
@@ -36,6 +36,19 @@ app.add_middleware(
 # 上传目录
 UPLOAD_DIR = os.path.join(os.getcwd(), "data", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+# ===== 启动事件 =====
+
+@app.on_event("startup")
+async def startup_event():
+    """服务启动时初始化知识图谱"""
+    try:
+        from src.kg.graph_builder import init_default_graph
+        stats = init_default_graph()
+        logger.info(f"知识图谱初始化完成: {stats}")
+    except Exception as e:
+        logger.warning(f"知识图谱初始化失败（可稍后手动初始化）: {e}")
 
 
 # ===== 数据模型 =====
@@ -76,6 +89,24 @@ def get_graph():
         _graph = build_graph(_llm)
         logger.info("Graph 初始化完成")
     return _graph
+
+
+# ===== 图谱推理引擎 =====
+
+_graph_reasoner = None
+
+
+def get_graph_reasoner():
+    """懒加载图谱推理引擎"""
+    global _graph_reasoner, _llm
+    if _graph_reasoner is None:
+        # 确保 LLM 已初始化
+        if _llm is None:
+            get_graph()
+        from src.kg.graph_reasoner import get_graph_reasoner as _get_reasoner
+        _graph_reasoner = _get_reasoner(llm=_llm)
+        logger.info("图谱推理引擎初始化完成")
+    return _graph_reasoner
 
 
 # ===== SSE 辅助函数 =====
@@ -1471,6 +1502,96 @@ async def clear_graph():
     store = get_graph_store()
     store.clear_all()
     return {"success": True}
+
+
+@app.post("/api/graph/init")
+async def init_graph():
+    """
+    手动触发知识图谱初始化。
+    从 Mock 说明书 + 常见零件数据库构建完整图谱。
+    """
+    try:
+        from src.kg.graph_builder import init_default_graph
+        stats = init_default_graph()
+        return {"success": True, **stats}
+    except Exception as e:
+        logger.error(f"图谱初始化失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"初始化失败: {str(e)}")
+
+
+class GraphReasonRequest(BaseModel):
+    query: str
+    set_id: str = "10295"
+    reasoning_type: str = ""  # 为空则自动判断
+
+
+@app.post("/api/graph/reason")
+async def graph_reason(request: GraphReasonRequest):
+    """
+    图谱深度推理。
+
+    支持三种推理：
+    - constraint: 多条件约束推理（有 A 无 B，找兼容 A 且替代 B 的零件）
+    - chain: 步骤链式推理（第 35 步和第 36 步能跳过吗？）
+    - stability: 结构稳定性推理（这个位置放 1x2 板够稳固吗？）
+    """
+    try:
+        reasoner = get_graph_reasoner()
+
+        # 自动判断推理类型
+        reasoning_type = request.reasoning_type
+        if not reasoning_type:
+            import re
+            part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", request.query)
+            has_alt = any(kw in request.query for kw in ["替代", "替换", "代替", "缺", "没有", "可以", "兼容"])
+            if len(part_ids) >= 2 and has_alt:
+                from src.kg.graph_reasoner import REASONING_CONSTRAINT
+                reasoning_type = REASONING_CONSTRAINT
+            elif re.search(r"(跳过|省略|之间|顺序|先后)", request.query):
+                from src.kg.graph_reasoner import REASONING_CHAIN
+                reasoning_type = REASONING_CHAIN
+            elif re.search(r"(稳固|牢固|稳定|结实|够|撑得住)", request.query):
+                from src.kg.graph_reasoner import REASONING_STABILITY
+                reasoning_type = REASONING_STABILITY
+            else:
+                from src.kg.graph_reasoner import REASONING_CONSTRAINT
+                reasoning_type = REASONING_CONSTRAINT
+
+        result = reasoner.reason(
+            query=request.query,
+            reasoning_type=reasoning_type,
+            context={"set_id": request.set_id},
+        )
+
+        return {
+            "success": True,
+            "query": request.query,
+            "reasoning_type": reasoning_type,
+            "result": result,
+        }
+    except Exception as e:
+        logger.error(f"图谱推理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"推理失败: {str(e)}")
+
+
+@app.get("/api/graph/cross-modal")
+async def graph_cross_modal(
+    query: str,
+    set_id: str = "10295",
+    limit: int = 5,
+):
+    """
+    图谱跨模态搜索（文本→图片）。
+    从文本中提取零件号，查找图谱中关联的图片节点。
+    """
+    try:
+        from src.kg.graph_retriever import get_graph_retriever
+        retriever = get_graph_retriever()
+        results = retriever.cross_modal_search(query, modality="text", limit=limit)
+        return {"results": results, "query": query}
+    except Exception as e:
+        logger.error(f"跨模态搜索失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
 
 
 # ===== 统一检索端点 =====

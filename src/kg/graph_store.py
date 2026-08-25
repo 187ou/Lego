@@ -47,20 +47,33 @@ class Neo4jGraphStore(GraphStore):
     """Neo4j 图谱存储"""
 
     def __init__(self):
-        self._client = None
+        self._driver = None
         self._available = False
         self._connect()
 
     def _connect(self):
-        """连接 Neo4j"""
+        """连接 Neo4j（直接持有 driver，不用上下文管理器）"""
         try:
-            from src.knowledge.neo4j_client import Neo4jClient
-            self._client = Neo4jClient()
+            from neo4j import GraphDatabase
+            from src.common.config import get_settings
+            settings = get_settings()
+            self._driver = GraphDatabase.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_user, settings.neo4j_password),
+            )
+            # 验证连接
+            self._driver.verify_connectivity()
             self._available = True
             print("[OK] Neo4j 连接成功")
         except Exception as e:
             print(f"[WARN] Neo4j 连接失败: {e}，将使用内存存储")
             self._available = False
+
+    def _run_query(self, query: str, **kwargs):
+        """执行查询的通用方法，每次创建新 session，避免 driver 被关闭"""
+        with self._driver.session() as session:
+            result = session.run(query, **kwargs)
+            return [record.data() for record in result]
 
     @property
     def is_available(self) -> bool:
@@ -72,26 +85,23 @@ class Neo4jGraphStore(GraphStore):
             return False
 
         try:
-            with self._client as client:
-                # 构建属性
-                props = {
-                    "node_id": node.node_id,
-                    "name": node.name,
-                    "node_type": node.node_type.value,
-                    **node.properties,
-                }
-                if node.text_description:
-                    props["text_description"] = node.text_description
-                if node.image_url:
-                    props["image_url"] = node.image_url
+            props = {
+                "node_id": node.node_id,
+                "name": node.name,
+                "node_type": node.node_type.value,
+                **node.properties,
+            }
+            if node.text_description:
+                props["text_description"] = node.text_description
+            if node.image_url:
+                props["image_url"] = node.image_url
 
-                # 创建节点
-                query = f"""
-                MERGE (n:{node.node_type.value} {{node_id: $node_id}})
-                SET n += $props
-                """
-                client._driver.session().run(query, node_id=node.node_id, props=props)
-                return True
+            query = f"""
+            MERGE (n:{node.node_type.value} {{node_id: $node_id}})
+            SET n += $props
+            """
+            self._run_query(query, node_id=node.node_id, props=props)
+            return True
         except Exception as e:
             print(f"[ERROR] 创建节点失败: {e}")
             return False
@@ -102,19 +112,18 @@ class Neo4jGraphStore(GraphStore):
             return False
 
         try:
-            with self._client as client:
-                query = f"""
-                MATCH (a {{node_id: $source_id}}), (b {{node_id: $target_id}})
-                MERGE (a)-[r:{relation.relation_type.value}]->(b)
-                SET r.confidence = $confidence
-                """
-                client._driver.session().run(
-                    query,
-                    source_id=relation.source_id,
-                    target_id=relation.target_id,
-                    confidence=relation.confidence,
-                )
-                return True
+            query = f"""
+            MATCH (a {{node_id: $source_id}}), (b {{node_id: $target_id}})
+            MERGE (a)-[r:{relation.relation_type.value}]->(b)
+            SET r.confidence = $confidence
+            """
+            self._run_query(
+                query,
+                source_id=relation.source_id,
+                target_id=relation.target_id,
+                confidence=relation.confidence,
+            )
+            return True
         except Exception as e:
             print(f"[ERROR] 创建关系失败: {e}")
             return False
@@ -125,12 +134,10 @@ class Neo4jGraphStore(GraphStore):
             return None
 
         try:
-            with self._client as client:
                 query = "MATCH (n {node_id: $node_id}) RETURN n"
-                result = client._driver.session().run(query, node_id=node_id)
-                record = result.single()
-                if record:
-                    node_data = dict(record["n"])
+                rows = self._run_query(query, node_id=node_id)
+                if rows:
+                    node_data = dict(rows[0]["n"])
                     return GraphNode(
                         node_type=NodeType(node_data.get("node_type", "PART")),
                         node_id=node_data["node_id"],
@@ -148,15 +155,13 @@ class Neo4jGraphStore(GraphStore):
             return []
 
         try:
-            with self._client as client:
-                query = """
+            query = """
                 MATCH (n {node_id: $node_id})-[r]-(m)
                 RETURN type(r) as relation, m.node_id as node_id,
                        m.name as name, m.node_type as node_type
                 LIMIT $limit
                 """
-                result = client._driver.session().run(query, node_id=node_id, limit=limit)
-                return [dict(record.data()) for record in result]
+            return self._run_query(query, node_id=node_id, limit=limit)
         except Exception as e:
             print(f"[ERROR] 获取邻居失败: {e}")
             return []
@@ -167,17 +172,20 @@ class Neo4jGraphStore(GraphStore):
             return []
 
         try:
-            with self._client as client:
-                query = """
-                MATCH (p {node_id: $part_id})-[r:CAN_REPLACE*1..3]-(alt)
-                WHERE alt.node_id <> $part_id
+            node_id = f"part_{part_id}" if not part_id.startswith("part_") else part_id
+            query = """
+                MATCH (p {node_id: $node_id})-[r:CAN_REPLACE*1..3]-(alt)
+                WHERE alt.node_id <> $node_id
                 RETURN DISTINCT alt.node_id as part_id, alt.name as name,
                        length(shortestPath((p)-[:CAN_REPLACE*]-(alt))) as distance
                 ORDER BY distance
                 LIMIT $limit
                 """
-                result = client._driver.session().run(query, part_id=part_id, limit=limit)
-                return [dict(record.data()) for record in result]
+            results = self._run_query(query, node_id=node_id, limit=limit)
+            # 去掉 part_ 前缀
+            for r in results:
+                r["part_id"] = r["part_id"].replace("part_", "")
+            return results
         except Exception as e:
             print(f"[ERROR] 查找替代失败: {e}")
             return []
@@ -188,24 +196,23 @@ class Neo4jGraphStore(GraphStore):
             return {"available": False}
 
         try:
-            with self._client as client:
-                # 节点统计
-                node_query = "MATCH (n) RETURN labels(n)[0] as label, count(n) as count"
-                node_result = client._driver.session().run(node_query)
-                nodes = {record["label"]: record["count"] for record in node_result}
+            node_rows = self._run_query(
+                "MATCH (n) RETURN labels(n)[0] as label, count(n) as count"
+            )
+            nodes = {r["label"]: r["count"] for r in node_rows}
 
-                # 关系统计
-                rel_query = "MATCH ()-[r]->() RETURN type(r) as type, count(r) as count"
-                rel_result = client._driver.session().run(rel_query)
-                rels = {record["type"]: record["count"] for record in rel_result}
+            rel_rows = self._run_query(
+                "MATCH ()-[r]->() RETURN type(r) as type, count(r) as count"
+            )
+            rels = {r["type"]: r["count"] for r in rel_rows}
 
-                return {
-                    "available": True,
-                    "nodes": nodes,
-                    "relationships": rels,
-                    "total_nodes": sum(nodes.values()),
-                    "total_relationships": sum(rels.values()),
-                }
+            return {
+                "available": True,
+                "nodes": nodes,
+                "relationships": rels,
+                "total_nodes": sum(nodes.values()),
+                "total_relationships": sum(rels.values()),
+            }
         except Exception as e:
             return {"available": False, "error": str(e)}
 
@@ -215,10 +222,14 @@ class Neo4jGraphStore(GraphStore):
             return
 
         try:
-            with self._client as client:
-                client._driver.session().run("MATCH (n) DETACH DELETE n")
+            self._run_query("MATCH (n) DETACH DELETE n")
         except Exception as e:
             print(f"[ERROR] 清除失败: {e}")
+
+    def close(self):
+        """关闭 driver"""
+        if self._driver:
+            self._driver.close()
 
 
 class MockGraphStore(GraphStore):

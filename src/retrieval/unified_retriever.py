@@ -70,11 +70,22 @@ class UnifiedRetriever:
         if graph_results:
             results_by_source["graph"] = graph_results
 
-        # L4: 跨模态检索
+        # L4: 图谱跨模态检索（文本→图片）
+        cross_modal_graph_results = self._retrieve_cross_modal_from_graph(query, set_id)
+        if cross_modal_graph_results:
+            results_by_source["cross_modal_graph"] = cross_modal_graph_results
+
+        # L4: 跨模态检索（图片→文本）
         if image:
             cross_modal_results = self._retrieve_cross_modal(query, image, set_id)
             if cross_modal_results:
                 results_by_source["cross_modal"] = cross_modal_results
+
+        # L4+: LLM 图谱深度推理
+        if self._needs_deep_reasoning(query):
+            reasoned_results = self._retrieve_with_graph_reasoning(query, set_id)
+            if reasoned_results:
+                results_by_source["graph_reasoning"] = reasoned_results
 
         # 融合
         fused = self.fusion_strategy.fuse(results_by_source)
@@ -236,7 +247,7 @@ class UnifiedRetriever:
     def _retrieve_cross_modal(
         self, query: str, image: bytes, set_id: str
     ) -> list[RetrievalResult]:
-        """跨模态检索"""
+        """跨模态检索（图片→文本）"""
         results = []
 
         try:
@@ -256,6 +267,122 @@ class UnifiedRetriever:
                 ))
         except Exception as e:
             print(f"[WARN] 跨模态检索失败: {e}")
+
+        return results
+
+    def _retrieve_cross_modal_from_graph(
+        self, query: str, set_id: str
+    ) -> list[RetrievalResult]:
+        """
+        图谱跨模态检索（文本→图片）。
+        从文本中提取零件号，查找图谱中关联的图片节点。
+        """
+        results = []
+
+        try:
+            from src.kg.graph_retriever import get_graph_retriever
+            retriever = get_graph_retriever()
+
+            cm_results = retriever.cross_modal_search(query, modality="text", limit=5)
+
+            for r in cm_results:
+                results.append(RetrievalResult(
+                    content=f"[跨模态] {r.get('target_name', '')} ({r.get('match', '')})",
+                    source="cross_modal_graph",
+                    score=r.get("score", 0.5),
+                    metadata=r,
+                    doc_id=r.get("target", ""),
+                ))
+        except Exception as e:
+            print(f"[WARN] 图谱跨模态检索失败: {e}")
+
+        return results
+
+    def _needs_deep_reasoning(self, query: str) -> bool:
+        """
+        判断查询是否需要 LLM 深度推理。
+
+        触发条件：
+        - 涉及多个零件的约束型替代查询
+        - 涉及步骤跳过/顺序调整
+        - 涉及结构稳定性评估
+        """
+        import re
+
+        # 约束型：多个零件 + 替代/缺件关键词
+        part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", query)
+        has_alternative_intent = any(
+            kw in query for kw in ["替代", "替换", "代替", "缺", "没有", "可以", "兼容"]
+        )
+        if len(part_ids) >= 2 and has_alternative_intent:
+            return True
+
+        # 链式推理：步骤 + 跳过/顺序
+        if re.search(r"(跳过|省略|之间|顺序|先后|第?\s*\d+\s*步)", query):
+            return True
+
+        # 稳定性推理
+        if re.search(r"(稳固|牢固|稳定|结实|够|撑得住|承受)", query):
+            return True
+
+        return False
+
+    def _retrieve_with_graph_reasoning(
+        self, query: str, set_id: str
+    ) -> list[RetrievalResult]:
+        """
+        调用 LLM 图谱推理引擎进行深度推理。
+        """
+        results = []
+
+        try:
+            from src.kg.graph_reasoner import get_graph_reasoner, REASONING_CONSTRAINT, REASONING_CHAIN, REASONING_STABILITY
+            import re
+
+            reasoner = get_graph_reasoner()
+
+            # 判断推理类型
+            part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", query)
+            has_alternative_intent = any(
+                kw in query for kw in ["替代", "替换", "代替", "缺", "没有", "可以", "兼容"]
+            )
+
+            if len(part_ids) >= 2 and has_alternative_intent:
+                reasoning_type = REASONING_CONSTRAINT
+            elif re.search(r"(跳过|省略|之间|顺序|先后)", query):
+                reasoning_type = REASONING_CHAIN
+            elif re.search(r"(稳固|牢固|稳定|结实|够|撑得住)", query):
+                reasoning_type = REASONING_STABILITY
+            else:
+                reasoning_type = REASONING_CONSTRAINT
+
+            result = reasoner.reason(
+                query=query,
+                reasoning_type=reasoning_type,
+                context={"set_id": set_id},
+            )
+
+            conclusion = result.get("conclusion", "")
+            confidence = result.get("confidence", 0)
+            suggestions = result.get("suggestions", [])
+            risks = result.get("risks", [])
+
+            if conclusion:
+                content_parts = [conclusion]
+                if suggestions:
+                    content_parts.append(f"建议: {'; '.join(suggestions[:3])}")
+                if risks:
+                    content_parts.append(f"注意: {'; '.join(risks[:3])}")
+
+                results.append(RetrievalResult(
+                    content="\n".join(content_parts),
+                    source="graph_reasoning",
+                    score=min(0.95, 0.7 + confidence * 0.3),
+                    metadata={"reasoning_result": result},
+                    doc_id="graph_reasoning",
+                ))
+        except Exception as e:
+            print(f"[WARN] 图谱深度推理失败: {e}")
 
         return results
 

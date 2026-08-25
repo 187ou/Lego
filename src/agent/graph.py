@@ -81,19 +81,37 @@ def build_graph(llm: BaseChatModel):
         return {}
 
     def respond_node(state: AgentState) -> dict:
-        """回复节点：生成最终回复 + 发送通知"""
+        """回复节点：生成最终回复 + 融入图谱推理结果 + 发送通知"""
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and not last_message.tool_calls:
-            return {"response": last_message.content}
+            response_text = last_message.content
+        else:
+            messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
+            response = llm_with_tools.invoke(messages)
+            response_text = response.content if hasattr(response, "content") else str(response)
 
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-        response = llm_with_tools.invoke(messages)
+        # 融入图谱推理结果
+        reasoning_result = state.get("graph_reasoning_result", {})
+        if state.get("needs_graph_reasoning") and reasoning_result:
+            conclusion = reasoning_result.get("conclusion", "")
+            confidence = reasoning_result.get("confidence", 0)
+            suggestions = reasoning_result.get("suggestions", [])
+            risks = reasoning_result.get("risks", [])
 
-        _send_notification_if_needed(state, response.content)
+            if conclusion and confidence > 0.3:
+                reasoning_parts = [f"\n\n🧠 **深度推理** (置信度 {confidence:.0%})\n{conclusion}"]
+                if suggestions:
+                    reasoning_parts.append(f"\n💡 建议: {'; '.join(suggestions[:3])}")
+                if risks:
+                    reasoning_parts.append(f"\n⚠️ 注意: {'; '.join(risks[:3])}")
+
+                response_text += "".join(reasoning_parts)
+
+        _send_notification_if_needed(state, response_text)
 
         return {
-            "messages": [response],
-            "response": response.content,
+            "messages": [AIMessage(content=response_text)],
+            "response": response_text,
         }
 
     def frustration_check_node(state: AgentState) -> dict:
@@ -162,6 +180,80 @@ def build_graph(llm: BaseChatModel):
             "frustration_score": max(0, score - 30),
         }
 
+    def graph_reason_node(state: AgentState) -> dict:
+        """
+        图谱深度推理节点
+        当工具调用结果需要进一步推理时，调用 LLM 进行图谱推理
+        """
+        import re
+
+        last_user_msg = ""
+        for msg in reversed(state.get("messages", [])):
+            if hasattr(msg, "content") and getattr(msg, "type", "") == "human":
+                last_user_msg = msg.content
+                break
+
+        # 判断推理类型
+        reasoning_type = _detect_reasoning_type(last_user_msg)
+
+        if not reasoning_type:
+            return {"needs_graph_reasoning": False, "graph_reasoning_result": {}}
+
+        # 调用图谱推理引擎
+        try:
+            from src.kg.graph_reasoner import get_graph_reasoner
+            reasoner = get_graph_reasoner()
+
+            result = reasoner.reason(
+                query=last_user_msg,
+                reasoning_type=reasoning_type,
+                context={"set_id": state.get("set_id", "")},
+            )
+
+            return {
+                "needs_graph_reasoning": True,
+                "graph_reasoning_result": result,
+            }
+        except Exception as e:
+            print(f"[WARN] 图谱推理失败: {e}")
+            return {"needs_graph_reasoning": False, "graph_reasoning_result": {}}
+
+    def _detect_reasoning_type(message: str) -> str:
+        """检测用户消息需要的推理类型"""
+        # 约束推理特征：提到"替代""缺""没有""可以...吗"且涉及多个零件
+        constraint_patterns = [
+            r"(缺|没有|替代|替换|代替).*(可以|用什么|有什么)",
+            r"(有|有).(缺|没有|没)",
+            r"(可以|能).*(替代|替换|代替)",
+        ]
+        for p in constraint_patterns:
+            if re.search(p, message):
+                # 检查是否涉及多个零件号
+                part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", message)
+                if len(part_ids) >= 2:
+                    return "constraint"
+
+        # 链式推理特征：提到步骤+跳过/顺序/之间
+        chain_patterns = [
+            r"(第?\s*\d+\s*步).*(跳过|省略|之间|顺序|先后)",
+            r"(跳过|省略).*(第?\s*\d+\s*步)",
+            r"(第?\s*\d+\s*步).*(第?\s*\d+\s*步).*(之间|中间)",
+        ]
+        for p in chain_patterns:
+            if re.search(p, message, re.IGNORECASE):
+                return "chain"
+
+        # 稳定性推理特征：提到稳固/牢固/稳定/够吗
+        stability_patterns = [
+            r"(稳固|牢固|稳定|结实|够|行不行|可以吗)",
+            r"(会不会|能承受|撑得住)",
+        ]
+        for p in stability_patterns:
+            if re.search(p, message):
+                return "stability"
+
+        return ""
+
     def _send_notification_if_needed(state: AgentState, response_content: str):
         """根据工具调用结果发送通知"""
         try:
@@ -216,6 +308,7 @@ def build_graph(llm: BaseChatModel):
     # 添加节点
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", tool_node)
+    workflow.add_node("graph_reason", graph_reason_node)
     workflow.add_node("human_check", human_in_the_loop_node)
     workflow.add_node("respond", respond_node)
     workflow.add_node("frustration_check", frustration_check_node)
@@ -231,7 +324,11 @@ def build_graph(llm: BaseChatModel):
         {"tools": "tools", "respond": "respond"},
     )
 
-    workflow.add_edge("tools", "human_check")
+    # tools → graph_reason（推理引擎分析工具结果）
+    workflow.add_edge("tools", "graph_reason")
+
+    # graph_reason → human_check（挂起等待确认）
+    workflow.add_edge("graph_reason", "human_check")
     workflow.add_edge("human_check", "respond")
 
     # 回复后 → 挫折检测（旁路）
