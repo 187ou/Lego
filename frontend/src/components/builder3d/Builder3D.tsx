@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Volume2, VolumeX, ChevronLeft, ChevronRight, Loader2 } from "lucide-react"
 import { useState } from "react"
 import { useChatStepSync } from "@/hooks/useChatStepSync"
+import { Sparkles } from "lucide-react"
 
 export function Builder3D() {
   const {
@@ -28,6 +29,9 @@ export function Builder3D() {
     loadFromAPI,
   } = useBuilder3dStore()
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [aiPrompt, setAiPrompt] = useState("")
+  const [aiLoading, setAiLoading] = useState(false)
+  const [showAiDialog, setShowAiDialog] = useState(false)
   const currentSet = useChatStore((s) => s.currentSet)
 
   // 启用聊天步骤联动
@@ -48,6 +52,31 @@ export function Builder3D() {
       loadFromAPI(currentSet.set_id, currentSet.name, currentSet.total_steps)
     }
   }, [currentSet, useRealData, loadFromAPI])
+
+  // AI 生成模型
+  const handleAiGenerate = async () => {
+    if (!aiPrompt.trim()) return
+    setAiLoading(true)
+    try {
+      const resp = await fetch("/api/builder3d/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ description: aiPrompt }),
+      })
+      const data = await resp.json()
+      if (data.success && data.model) {
+        const { convertAPIToModel } = await import("@/types/builder3d")
+        const model = convertAPIToModel(data.model)
+        setModel(model)
+        setShowAiDialog(false)
+        setAiPrompt("")
+      }
+    } catch (error) {
+      console.error("AI generation failed:", error)
+    } finally {
+      setAiLoading(false)
+    }
+  }
 
   const currentStepData = model.steps[currentStep - 1]
 
@@ -163,6 +192,39 @@ export function Builder3D() {
 
       {/* 完成庆祝动画 */}
       <CelebrationOverlay />
+
+      {/* AI 生成按钮（右下角） */}
+      <div className="absolute bottom-4 right-4">
+        <Button
+          size="icon"
+          onClick={() => setShowAiDialog(true)}
+          className="rounded-full shadow-lg"
+        >
+          <Sparkles className="h-4 w-4" />
+        </Button>
+      </div>
+
+      {/* AI 生成对话框 */}
+      {showAiDialog && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+          <div className="bg-background border rounded-xl shadow-2xl p-6 w-96 space-y-4">
+            <h3 className="font-semibold text-lg">AI 生成 3D 模型</h3>
+            <textarea
+              className="w-full h-24 px-3 py-2 border rounded-md text-sm resize-none"
+              placeholder="描述你想拼的模型，如：一辆红色小车、一座小城堡..."
+              value={aiPrompt}
+              onChange={(e) => setAiPrompt(e.target.value)}
+            />
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setShowAiDialog(false)}>取消</Button>
+              <Button onClick={handleAiGenerate} disabled={aiLoading}>
+                {aiLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {" "}生成
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

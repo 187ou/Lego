@@ -1408,6 +1408,37 @@ async def part_stats():
     return recognizer.get_stats()
 
 
+# ===== AI 模型生成端点 =====
+
+class GenerateModelRequest(BaseModel):
+    description: str
+    base_width: int = 16
+    base_length: int = 16
+    max_attempts: int = 3
+
+
+@app.post("/api/builder3d/generate")
+async def generate_3d_model(request: GenerateModelRequest):
+    """
+    AI 生成 3D 积木模型。
+
+    流程：LLM 生成 → 物理验证 → 自动修正 → 返回 BuildModel
+    """
+    try:
+        from src.builder3d.pipeline import get_pipeline
+        pipeline = get_pipeline()
+        model = pipeline.generate(
+            description=request.description,
+            base_width=request.base_width,
+            base_length=request.base_length,
+            max_attempts=request.max_attempts,
+        )
+        return {"success": True, "model": model}
+    except Exception as e:
+        logger.error(f"AI 模型生成失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成失败: {str(e)}")
+
+
 # ===== 知识图谱端点 =====
 
 @app.get("/api/graph/stats")
