@@ -42,13 +42,21 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.on_event("startup")
 async def startup_event():
-    """服务启动时初始化知识图谱"""
+    """服务启动时初始化知识图谱 + Text2API 引擎"""
     try:
         from src.kg.graph_builder import init_default_graph
         stats = init_default_graph()
         logger.info(f"知识图谱初始化完成: {stats}")
     except Exception as e:
         logger.warning(f"知识图谱初始化失败（可稍后手动初始化）: {e}")
+
+    # 初始化 Text2API 引擎
+    try:
+        from src.agent.api_registry import init_text2api
+        engine = init_text2api()
+        logger.info("Text2API 引擎初始化完成")
+    except Exception as e:
+        logger.warning(f"Text2API 引擎初始化失败: {e}")
 
 
 # ===== 数据模型 =====
@@ -857,6 +865,81 @@ async def get_upload(filename: str):
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="文件不存在")
     return FileResponse(file_path)
+
+
+# ===== Text2API 端点 =====
+
+@app.post("/api/text2api")
+async def text2api_call(request: dict):
+    """
+    Text2API 调用端点——LLM 动态选择并执行 API
+
+    Request: {"message": "用户输入", "set_id": "可选"}
+    Response: {"success": bool, "api": str, "result": ..., "confidence": float}
+    """
+    message = request.get("message", "")
+    if not message:
+        raise HTTPException(status_code=400, detail="message 不能为空")
+
+    try:
+        from src.agent.api_registry import get_registry
+        from src.agent.text2api import get_text2api_engine
+
+        engine = get_text2api_engine()
+        result = engine.run(message)
+        return result
+    except Exception as e:
+        logger.error(f"❌ Text2API 错误: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/text2api/apis")
+async def list_text2api_apis():
+    """列出所有已注册的 API"""
+    try:
+        from src.agent.api_registry import get_registry
+        registry = get_registry()
+        apis = registry.list_apis()
+        return {
+            "apis": [
+                {
+                    "name": api.name,
+                    "description": api.description,
+                    "parameters": [
+                        {"name": p.name, "type": p.type, "required": p.required}
+                        for p in api.parameters
+                    ],
+                }
+                for api in apis
+            ],
+            "count": len(apis),
+        }
+    except Exception as e:
+        logger.error(f"❌ 列出 API 错误: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/text2api/stats")
+async def get_text2api_stats():
+    """获取 Text2API 评估统计"""
+    try:
+        from src.agent.text2api import get_evaluation_stats
+        return get_evaluation_stats()
+    except Exception as e:
+        logger.error(f"❌ 获取统计错误: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/text2api/logs")
+async def clear_text2api_logs():
+    """清空评估日志"""
+    try:
+        from src.agent.text2api import clear_evaluation_logs
+        clear_evaluation_logs()
+        return {"message": "评估日志已清空"}
+    except Exception as e:
+        logger.error(f"❌ 清空日志错误: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===== 对话管理端点 =====

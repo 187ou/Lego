@@ -66,6 +66,7 @@ class Intent:
     tool_name: Optional[str] = None  # L2 需要
     tool_args: Optional[dict] = None  # L2 需要
     raw_message: str = ""
+    text2api_result: Optional[dict] = None  # Text2API 结果（L3 层）
 
 
 # ===== 预编译正则（模块加载时一次性编译） =====
@@ -529,7 +530,42 @@ def _do_classify(message: str, has_image: bool = False) -> Intent:
                     raw_message=msg,
                 )
 
-    # ===== 4. L3: 完整 Agent（兜底） =====
+    # ===== 4. L3: Text2API 尝试 → 完整 Agent（兜底） =====
+
+    # 4.1 先用 Text2API 尝试理解用户意图并选择 API
+    try:
+        from src.agent.text2api import get_text2api_engine
+        from src.agent.api_registry import get_registry
+
+        registry = get_registry()
+        if registry.list_apis():  # 确保有注册的 API
+            engine = get_text2api_engine()
+            text2api_result = engine.run(msg)
+
+            if text2api_result.get("success") and text2api_result.get("confidence", 0) > 0.7:
+                # Text2API 成功，映射 api_name 到 IntentType
+                api_name = text2api_result.get("api", "")
+                api_to_intent = {
+                    "parse_lego_image": IntentType.PARSE_IMAGE,
+                    "find_part_alternative": IntentType.FIND_ALTERNATIVE,
+                    "search_manual_step": IntentType.SEARCH_MANUAL,
+                    "verify_build_result": IntentType.VERIFY_BUILD,
+                }
+                intent_type = api_to_intent.get(api_name, IntentType.COMPLEX)
+                return Intent(
+                    intent_type=intent_type,
+                    level=ResponseLevel.L2_TOOL,
+                    confidence=text2api_result.get("confidence", 0.7),
+                    tool_name=api_name,
+                    tool_args=text2api_result.get("parameters", {}),
+                    raw_message=msg,
+                    text2api_result=text2api_result,
+                )
+    except Exception:
+        # Text2API 失败，继续走 fallback
+        pass
+
+    # 4.2 fallback 到完整 Agent
     return Intent(
         intent_type=IntentType.COMPLEX,
         level=ResponseLevel.L3_AGENT,
