@@ -30,7 +30,7 @@ class AgentState(TypedDict):
     # 最终响应文本
     response: str
 
-    # ===== 心理感知相关（新增） =====
+    # ===== 心理感知相关 =====
     # 挫折分数（0-100，越高表示用户越沮丧）
     frustration_score: int
 
@@ -52,3 +52,17 @@ class AgentState(TypedDict):
 
     # 是否需要图谱深度推理
     needs_graph_reasoning: bool
+
+    # ===== 多 Agent 调度相关 =====
+    # Supervisor 决定的下一个 Agent
+    next_agent: str
+
+    # 各 Agent 执行结果汇总
+    agent_results: dict[str, Any]
+
+    # 各 Agent 专用输出
+    vision_result: dict[str, Any]
+    alternative_result: dict[str, Any]
+    manual_result: dict[str, Any]
+    verify_result: dict[str, Any]
+    psychology_result: dict[str, Any]

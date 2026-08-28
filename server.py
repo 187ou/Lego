@@ -265,7 +265,7 @@ async def stream_chat(request: ChatRequest) -> AsyncGenerator[str, None]:
         yield sse_event("thinking", {"status": "routing", "message": "🔀 选择最佳处理方式..."})
         await asyncio.sleep(0.2)
 
-        # === 7. 调用 Agent ===
+        # === 7. 调用多 Agent 图（Supervisor 自动路由）===
         result = await asyncio.to_thread(
             graph.invoke,
             {
@@ -281,6 +281,14 @@ async def stream_chat(request: ChatRequest) -> AsyncGenerator[str, None]:
                 "last_active_time": wm.last_active_time,
                 "encouragement_triggered": False,
                 "encouragement_messages": [],
+                # 多 Agent 调度字段
+                "next_agent": "",
+                "agent_results": {},
+                "vision_result": {},
+                "alternative_result": {},
+                "manual_result": {},
+                "verify_result": {},
+                "psychology_result": {},
             }
         )
 
@@ -648,6 +656,14 @@ async def _stream_agent_full(request: ChatRequest, conv_manager) -> AsyncGenerat
                 "last_active_time": time.time(),
                 "encouragement_triggered": False,
                 "encouragement_messages": [],
+                # 多 Agent 调度字段
+                "next_agent": "",
+                "agent_results": {},
+                "vision_result": {},
+                "alternative_result": {},
+                "manual_result": {},
+                "verify_result": {},
+                "psychology_result": {},
             }
         )
 
@@ -756,6 +772,14 @@ async def chat(request: ChatRequest):
                 "last_active_time": time.time(),
                 "encouragement_triggered": False,
                 "encouragement_messages": [],
+                # 多 Agent 调度字段
+                "next_agent": "",
+                "agent_results": {},
+                "vision_result": {},
+                "alternative_result": {},
+                "manual_result": {},
+                "verify_result": {},
+                "psychology_result": {},
             }
         )
 

@@ -16,8 +16,8 @@ from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
-
 # 嵌入模型（本地运行，无需 API Key）
+# 镜像源通过 .env 中的 HF_ENDPOINT 配置
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"  # 中文友好，体积小
 
 

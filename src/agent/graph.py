@@ -1,22 +1,112 @@
-"""LangGraph 对话中枢——完整状态机实现（含心理安抚旁路）
+"""LangGraph 多 Agent 对话中枢
+
+架构：Supervisor 模式
+- Supervisor Agent：分析意图，调度专家 Agent
+- 专家 Agent：vision / alternative / manual / verify / psychology / chat
+- Aggregator：汇总各 Agent 结果，生成最终回复
 
 状态流转：
-待解析 → 进度确认 → 缺件待补/结构纠偏
-                     ↓ (挂起超时/重复提问/情绪词命中)
-                【心理安抚节点】← 非阻塞旁路触发
-                     ↓
-              等待用户操作（挂起）→ 二次验收 → 已归档
+用户输入 → Supervisor → 路由到专家Agent → Aggregator → 输出
+                         ↓ (心理安抚可并行)
+                      Psychology Agent
 """
 
 import time
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
 from langchain_core.messages import SystemMessage, AIMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.state import AgentState
-from src.agent.tools import ALL_TOOLS
+from src.agent.supervisor import supervisor_node, route_to_agent, aggregator_node
 
+
+def build_graph(llm: BaseChatModel):
+    """构建多 Agent LangGraph 状态机"""
+
+    # ===== 构建图 =====
+    workflow = StateGraph(AgentState)
+
+    # ===== 添加节点 =====
+    workflow.add_node("supervisor", lambda state: supervisor_node(state, llm))
+    workflow.add_node("vision", lambda state: _vision_node(state, llm))
+    workflow.add_node("alternative", lambda state: _alternative_node(state, llm))
+    workflow.add_node("manual", lambda state: _manual_node(state, llm))
+    workflow.add_node("verify", lambda state: _verify_node(state, llm))
+    workflow.add_node("psychology", lambda state: _psychology_node(state, llm))
+    workflow.add_node("chat", lambda state: _chat_node(state, llm))
+    workflow.add_node("aggregator", lambda state: aggregator_node(state, llm))
+
+    # ===== 设置入口 =====
+    workflow.set_entry_point("supervisor")
+
+    # ===== Supervisor → 专家 Agent（条件路由）=====
+    workflow.add_conditional_edges(
+        "supervisor",
+        route_to_agent,
+        {
+            "vision": "vision",
+            "alternative": "alternative",
+            "manual": "manual",
+            "verify": "verify",
+            "psychology": "psychology",
+            "chat": "chat",
+            "end": END,
+        },
+    )
+
+    # ===== 所有专家 Agent → Aggregator =====
+    for agent_name in ["vision", "alternative", "manual", "verify", "psychology", "chat"]:
+        workflow.add_edge(agent_name, "aggregator")
+
+    # ===== Aggregator → END =====
+    workflow.add_edge("aggregator", END)
+
+    return workflow.compile()
+
+
+# ===== 专家 Agent 节点包装器 =====
+# 这些包装器将 llm 传递给各 Agent 节点函数
+
+def _vision_node(state: AgentState, llm: BaseChatModel) -> dict:
+    """视觉识别 Agent 节点"""
+    from src.agent.agents.vision_agent import vision_agent_node
+    return vision_agent_node(state, llm)
+
+
+def _alternative_node(state: AgentState, llm: BaseChatModel) -> dict:
+    """零件替代 Agent 节点"""
+    from src.agent.agents.alternative_agent import alternative_agent_node
+    return alternative_agent_node(state, llm)
+
+
+def _manual_node(state: AgentState, llm: BaseChatModel) -> dict:
+    """说明书检索 Agent 节点"""
+    from src.agent.agents.manual_agent import manual_agent_node
+    return manual_agent_node(state, llm)
+
+
+def _verify_node(state: AgentState, llm: BaseChatModel) -> dict:
+    """成品验收 Agent 节点"""
+    from src.agent.agents.verify_agent import verify_agent_node
+    return verify_agent_node(state, llm)
+
+
+def _psychology_node(state: AgentState, llm: BaseChatModel) -> dict:
+    """心理安抚 Agent 节点"""
+    from src.agent.agents.psychology_agent import psychology_agent_node
+    return psychology_agent_node(state, llm)
+
+
+def _chat_node(state: AgentState, llm: BaseChatModel) -> dict:
+    """闲聊 Agent 节点"""
+    from src.agent.agents.chat_agent import chat_agent_node
+    return chat_agent_node(state, llm)
+
+
+# ===== 兼容旧接口 =====
+# 保留旧的 build_graph 签名，确保 main.py 和 server.py 兼容
+
+# 保留 SYSTEM_PROMPT 供参考/兼容
 SYSTEM_PROMPT = """你是 LEGO-Mate，一个乐高拼搭智能助手。
 
 你可以帮助用户：
@@ -37,332 +127,3 @@ SYSTEM_PROMPT = """你是 LEGO-Mate，一个乐高拼搭智能助手。
 - 如果工具返回 warning，告知用户当前使用的是备用数据
 - 用户表现出沮丧时，给予鼓励和帮助
 """
-
-
-def build_graph(llm: BaseChatModel):
-    """构建 LangGraph 状态机（含心理安抚旁路）"""
-
-    llm_with_tools = llm.bind_tools(ALL_TOOLS)
-    tool_node = ToolNode(ALL_TOOLS)
-
-    # ===== 节点函数 =====
-
-    def agent_node(state: AgentState) -> dict:
-        """Agent 节点：调用 LLM 生成回复或工具调用"""
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-        response = llm_with_tools.invoke(messages)
-
-        require_confirm = False
-        if response.tool_calls:
-            for call in response.tool_calls:
-                if call["name"] in ("find_part_alternative", "verify_build_result"):
-                    require_confirm = True
-
-        return {
-            "messages": [response],
-            "require_human_confirm": require_confirm,
-            "last_active_time": time.time(),
-        }
-
-    def route_after_agent(state: AgentState) -> str:
-        """路由：有工具调用则执行，否则直接回复"""
-        last_message = state["messages"][-1]
-        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            return "tools"
-        return "respond"
-
-    def human_in_the_loop_node(state: AgentState) -> dict:
-        """Human-in-the-loop 节点：挂起等待用户确认"""
-        last_message = state["messages"][-1]
-        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            for call in last_message.tool_calls:
-                print(f"\n[HITL] 即将执行: {call['name']}")
-                print(f"  参数: {call['args']}")
-        return {}
-
-    def respond_node(state: AgentState) -> dict:
-        """回复节点：生成最终回复 + 融入图谱推理结果 + 发送通知"""
-        last_message = state["messages"][-1]
-        if isinstance(last_message, AIMessage) and not last_message.tool_calls:
-            response_text = last_message.content
-        else:
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-            response = llm_with_tools.invoke(messages)
-            response_text = response.content if hasattr(response, "content") else str(response)
-
-        # 融入图谱推理结果
-        reasoning_result = state.get("graph_reasoning_result", {})
-        if state.get("needs_graph_reasoning") and reasoning_result:
-            conclusion = reasoning_result.get("conclusion", "")
-            confidence = reasoning_result.get("confidence", 0)
-            suggestions = reasoning_result.get("suggestions", [])
-            risks = reasoning_result.get("risks", [])
-
-            if conclusion and confidence > 0.3:
-                reasoning_parts = [f"\n\n🧠 **深度推理** (置信度 {confidence:.0%})\n{conclusion}"]
-                if suggestions:
-                    reasoning_parts.append(f"\n💡 建议: {'; '.join(suggestions[:3])}")
-                if risks:
-                    reasoning_parts.append(f"\n⚠️ 注意: {'; '.join(risks[:3])}")
-
-                response_text += "".join(reasoning_parts)
-
-        _send_notification_if_needed(state, response_text)
-
-        return {
-            "messages": [AIMessage(content=response_text)],
-            "response": response_text,
-        }
-
-    def frustration_check_node(state: AgentState) -> dict:
-        """
-        挫折检测节点（旁路）
-        检测用户是否需要心理安抚，更新挫折分数
-        """
-        from src.psychology.frustration_detector import FrustrationDetector
-
-        detector = FrustrationDetector()
-        current_score = state.get("frustration_score", 0)
-        retry_count = state.get("retry_count", 0)
-        last_active = state.get("last_active_time", time.time())
-
-        # 获取最后一条用户消息
-        last_user_msg = ""
-        for msg in reversed(state.get("messages", [])):
-            if hasattr(msg, "content") and getattr(msg, "type", "") == "human":
-                last_user_msg = msg.content
-                break
-
-        msg_result = detector.check_message(last_user_msg)
-        retry_result = detector.check_retry(retry_count)
-        idle_result = detector.check_idle(last_active)
-
-        new_score = detector.calculate_frustration_score(
-            current_score, msg_result, retry_result, idle_result
-        )
-
-        return {"frustration_score": new_score}
-
-    def should_encourage(state: AgentState) -> str:
-        """判断是否需要心理安抚"""
-        score = state.get("frustration_score", 0)
-        retry_count = state.get("retry_count", 0)
-        last_active = state.get("last_active_time", time.time())
-
-        from src.psychology.frustration_detector import FrustrationDetector
-        detector = FrustrationDetector()
-
-        if detector.should_encourage(score, retry_count, last_active):
-            return "yes"
-        return "no"
-
-    def encouragement_node(state: AgentState) -> dict:
-        """
-        心理安抚节点（旁路）
-        生成共情话术，附加到响应中
-        """
-        from src.psychology.encouragement_library import get_encouragement_library
-
-        score = state.get("frustration_score", 0)
-        library = get_encouragement_library()
-        encouragement = library.get_full_encouragement(score)
-
-        # 将安抚话术附加到响应中
-        current_response = state.get("response", "")
-        if current_response:
-            new_response = f"{current_response}\n\n---\n💝 {encouragement}"
-        else:
-            new_response = f"💝 {encouragement}"
-
-        # 重置挫折分数
-        return {
-            "response": new_response,
-            "frustration_score": max(0, score - 30),
-        }
-
-    def graph_reason_node(state: AgentState) -> dict:
-        """
-        图谱深度推理节点
-        当工具调用结果需要进一步推理时，调用 LLM 进行图谱推理
-        """
-        import re
-
-        last_user_msg = ""
-        for msg in reversed(state.get("messages", [])):
-            if hasattr(msg, "content") and getattr(msg, "type", "") == "human":
-                last_user_msg = msg.content
-                break
-
-        # 判断推理类型
-        reasoning_type = _detect_reasoning_type(last_user_msg)
-
-        if not reasoning_type:
-            return {"needs_graph_reasoning": False, "graph_reasoning_result": {}}
-
-        # 调用图谱推理引擎
-        try:
-            from src.kg.graph_reasoner import get_graph_reasoner
-            reasoner = get_graph_reasoner()
-
-            result = reasoner.reason(
-                query=last_user_msg,
-                reasoning_type=reasoning_type,
-                context={"set_id": state.get("set_id", "")},
-            )
-
-            return {
-                "needs_graph_reasoning": True,
-                "graph_reasoning_result": result,
-            }
-        except Exception as e:
-            print(f"[WARN] 图谱推理失败: {e}")
-            return {"needs_graph_reasoning": False, "graph_reasoning_result": {}}
-
-    def _detect_reasoning_type(message: str) -> str:
-        """
-        检测用户消息需要的推理类型。
-        返回空字符串表示不需要图谱推理。
-        """
-        if not message or not message.strip():
-            return ""
-
-        # 否定检测：如果消息以否定词开头，不触发推理
-        negation_prefixes = ["不要", "不需要", "不想", "别", "不用"]
-        for prefix in negation_prefixes:
-            if message.strip().startswith(prefix):
-                return ""
-
-        # 约束推理特征：提到"替代""缺""没有""可以...吗"且涉及多个零件
-        constraint_patterns = [
-            r"(缺|没有|替代|替换|代替).*(可以|用什么|有什么)",
-            r"(有|有).(缺|没有|没)",
-            r"(可以|能).*(替代|替换|代替)",
-        ]
-        for p in constraint_patterns:
-            match = re.search(p, message)
-            if match:
-                # 检查匹配位置前是否有否定词
-                prefix = message[:match.start()]
-                if any(neg in prefix for neg in ["不", "没", "别"]):
-                    continue
-                # 检查是否涉及多个零件号
-                part_ids = re.findall(r"(?<!\d)(\d{4,5})(?!\d)", message)
-                if len(part_ids) >= 2:
-                    return "constraint"
-
-        # 链式推理特征：提到步骤+跳过/顺序/之间
-        chain_patterns = [
-            r"(第?\s*\d+\s*步).*(跳过|省略|之间|顺序|先后)",
-            r"(跳过|省略).*(第?\s*\d+\s*步)",
-            r"(第?\s*\d+\s*步).*(第?\s*\d+\s*步).*(之间|中间)",
-        ]
-        for p in chain_patterns:
-            if re.search(p, message, re.IGNORECASE):
-                return "chain"
-
-        # 稳定性推理特征：提到稳固/牢固/稳定/够吗
-        stability_patterns = [
-            r"(稳固|牢固|稳定|结实|够|行不行|可以吗)",
-            r"(会不会|能承受|撑得住)",
-        ]
-        for p in stability_patterns:
-            match = re.search(p, message)
-            if match:
-                prefix = message[:match.start()]
-                if any(neg in prefix for neg in ["不", "没", "别"]):
-                    continue
-                return "stability"
-
-        return ""
-
-    def _send_notification_if_needed(state: AgentState, response_content: str):
-        """根据工具调用结果发送通知"""
-        try:
-            from src.notification.feishu import (
-                send_build_verification_result,
-                send_missing_part_alert,
-            )
-
-            for msg in state["messages"]:
-                if hasattr(msg, "tool_calls") and msg.tool_calls:
-                    for call in msg.tool_calls:
-                        if call["name"] == "verify_build_result":
-                            for result_msg in state["messages"]:
-                                if hasattr(result_msg, "content") and "verdict" in str(result_msg.content):
-                                    import json
-                                    try:
-                                        data = json.loads(result_msg.content)
-                                        send_build_verification_result(
-                                            set_id=state.get("set_id", "unknown"),
-                                            verdict=data.get("verdict", "unknown"),
-                                            similarity=data.get("similarity", 0),
-                                            details=data.get("details", ""),
-                                        )
-                                    except:
-                                        pass
-                                    break
-
-                        elif call["name"] == "find_part_alternative":
-                            for result_msg in state["messages"]:
-                                if hasattr(result_msg, "content") and "alternatives" in str(result_msg.content):
-                                    import json
-                                    try:
-                                        data = json.loads(result_msg.content)
-                                        alts = data.get("alternatives", [])
-                                        if alts:
-                                            send_missing_part_alert(
-                                                set_id=state.get("set_id", "unknown"),
-                                                part_name=call["args"].get("part_name", "unknown"),
-                                                color=call["args"].get("color", "unknown"),
-                                                alternatives=alts,
-                                            )
-                                    except:
-                                        pass
-                                    break
-        except Exception as e:
-            print(f"[WARN] 通知发送失败: {e}")
-
-    # ===== 构建图 =====
-
-    workflow = StateGraph(AgentState)
-
-    # 添加节点
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", tool_node)
-    workflow.add_node("graph_reason", graph_reason_node)
-    workflow.add_node("human_check", human_in_the_loop_node)
-    workflow.add_node("respond", respond_node)
-    workflow.add_node("frustration_check", frustration_check_node)
-    workflow.add_node("encouragement", encouragement_node)
-
-    # 设置入口
-    workflow.set_entry_point("agent")
-
-    # 主流程
-    workflow.add_conditional_edges(
-        "agent",
-        route_after_agent,
-        {"tools": "tools", "respond": "respond"},
-    )
-
-    # tools → graph_reason（推理引擎分析工具结果）
-    workflow.add_edge("tools", "graph_reason")
-
-    # graph_reason → human_check（挂起等待确认）
-    workflow.add_edge("graph_reason", "human_check")
-    workflow.add_edge("human_check", "respond")
-
-    # 回复后 → 挫折检测（旁路）
-    workflow.add_edge("respond", "frustration_check")
-
-    # 挫折检测后 → 判断是否需要安抚
-    workflow.add_conditional_edges(
-        "frustration_check",
-        should_encourage,
-        {"yes": "encouragement", "no": END},
-    )
-
-    # 安抚后 → 结束
-    workflow.add_edge("encouragement", END)
-
-    return workflow.compile()

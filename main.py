@@ -41,7 +41,7 @@ def main():
         if not user_input:
             continue
 
-        # 调用 Graph
+        # 调用多 Agent 图（Supervisor 自动路由）
         result = graph.invoke({
             "messages": [HumanMessage(content=user_input)],
             "intent": "chat",
@@ -50,6 +50,14 @@ def main():
             "step_number": 0,
             "require_human_confirm": False,
             "response": "",
+            # 多 Agent 调度字段
+            "next_agent": "",
+            "agent_results": {},
+            "vision_result": {},
+            "alternative_result": {},
+            "manual_result": {},
+            "verify_result": {},
+            "psychology_result": {},
         })
 
         # 输出回复
@@ -59,6 +67,10 @@ def main():
         # 显示工具调用信息（调试用）
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             print(f"   [工具调用: {[c['name'] for c in last_message.tool_calls]}]")
+
+        # 显示路由信息（调试用）
+        routed_agent = result.get("next_agent", "unknown")
+        print(f"   [路由 Agent: {routed_agent}]")
 
 
 if __name__ == "__main__":
