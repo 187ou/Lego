@@ -350,8 +350,22 @@ PART_KNOWLEDGE_BASE = {
 
 
 def get_part_knowledge(part_id: str) -> Optional[dict]:
-    """获取零件知识"""
-    return PART_KNOWLEDGE_BASE.get(part_id)
+    """获取零件知识（优先从扩展数据库获取）"""
+    # 先从基础数据库查找
+    if part_id in PART_KNOWLEDGE_BASE:
+        return PART_KNOWLEDGE_BASE[part_id]
+
+    # 从扩展数据库查找
+    from src.kg.part_data_generator import get_extended_part_database
+    ext_db = get_extended_part_database()
+    return ext_db.get(part_id)
+
+
+def get_all_part_ids() -> list[str]:
+    """获取所有已知零件 ID"""
+    from src.kg.part_data_generator import get_extended_part_database
+    ext_db = get_extended_part_database()
+    return list(PART_KNOWLEDGE_BASE.keys()) + list(ext_db.keys())
 
 
 def calc_part_compatibility(part_a_id: str, part_b_id: str) -> float:

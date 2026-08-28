@@ -559,6 +559,45 @@ async def _stream_tool_direct(
         yield sse_event("error", {"message": f"工具调用失败: {str(e)}"})
 
 
+def _format_vision_result(result: dict) -> str:
+    """格式化视觉识别结果为友好的回复文本"""
+    parts = result.get("parts", [])
+    colors = result.get("colors", [])
+    step = result.get("step_number")
+    conf = result.get("confidence", 0)
+    source = result.get("source", "unknown")
+
+    lines = ["🔍 **图片识别结果：**\n"]
+
+    if parts:
+        lines.append("**识别到的零件：**")
+        for p in parts:
+            lines.append(f"- {p.get('name', '未知')} x{p.get('quantity', 1)} ({p.get('color', '未知')})")
+
+    if colors:
+        lines.append(f"\n**颜色：** {', '.join(colors)}")
+
+    if step:
+        lines.append(f"\n**步骤号：** 第 {step} 步")
+
+    lines.append(f"\n**置信度：** {conf:.0%}")
+
+    if source:
+        lines.append(f"**识别方式：** {source}")
+
+    if result.get("needs_retry"):
+        lines.append("\n⚠️ 图片不够清晰，建议重新拍摄")
+
+    # 如果有替代建议
+    alternatives = result.get("alternatives", [])
+    if alternatives:
+        lines.append("\n**其他可能匹配：**")
+        for alt in alternatives[:3]:
+            lines.append(f"- {alt.get('name', '未知')} (相似度 {alt.get('confidence', 0):.0%})")
+
+    return "\n".join(lines)
+
+
 def _format_tool_result(tool_name: str, result: dict, set_id: str) -> str:
     """格式化工具结果为友好的回复文本"""
     if tool_name == "find_part_alternative":
@@ -742,6 +781,17 @@ async def health():
     }
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus 指标端点"""
+    from src.agent.utils.metrics import get_metrics, get_content_type
+    from fastapi.responses import Response
+    return Response(
+        content=get_metrics(),
+        media_type=get_content_type(),
+    )
+
+
 # ===== 聊天端点 =====
 
 @app.post("/api/chat/stream")
@@ -819,40 +869,30 @@ async def chat_with_image(
     set_id: str = Form(""),
     conversation_id: str = Form(""),
 ):
-    """带图片的聊天"""
+    """带图片的聊天 - 异步解析 + 缓存"""
     try:
         image_path = os.path.join(UPLOAD_DIR, image.filename)
         with open(image_path, "wb") as f:
             shutil.copyfileobj(image.file, f)
 
         from src.agent.tools import parse_lego_image
-        parse_result = parse_lego_image.invoke({"image_url": image_path})
+        from src.agent.utils.cache import get_cache
 
-        prompt = message or "请帮我分析这张图片"
-        full_prompt = f"{prompt}\n\n[图片解析结果]\n{parse_result}"
+        # 检查缓存（相同图片路径短时间内不会变化）
+        cache = get_cache()
+        cache_key = f"vision:{hash(image_path)}"
+        parse_result = cache.get(cache_key)
 
-        graph = get_graph()
-        from langchain_core.messages import HumanMessage
+        if parse_result is None:
+            # 异步执行图片解析（避免阻塞）
+            parse_result = await asyncio.to_thread(
+                parse_lego_image.invoke, {"image_url": image_path}
+            )
+            # 缓存结果（图片解析结果不会变化，缓存 1 小时）
+            cache.set(cache_key, parse_result, ttl=3600)
 
-        result = await asyncio.to_thread(
-            graph.invoke,
-            {
-                "messages": [HumanMessage(content=full_prompt)],
-                "intent": "parse_image",
-                "parsed_result": parse_result,
-                "set_id": set_id,
-                "step_number": parse_result.get("step_number", 0),
-                "require_human_confirm": False,
-                "response": "",
-                "frustration_score": 0,
-                "retry_count": 0,
-                "last_active_time": time.time(),
-                "encouragement_triggered": False,
-                "encouragement_messages": [],
-            }
-        )
-
-        response_text = result.get("response", "")
+        # 直接格式化解析结果返回
+        response_text = _format_vision_result(parse_result)
 
         # 保存消息
         conv_manager = get_conv_manager()

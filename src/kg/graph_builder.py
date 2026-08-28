@@ -271,7 +271,7 @@ class GraphBuilder:
         return 1
 
     def _lookup_part_name(self, part_id: str) -> str:
-        """查找零件名称（从知识库获取）"""
+        """查找零件名称（从扩展知识库获取）"""
         from src.kg.schema import get_part_knowledge
         knowledge = get_part_knowledge(part_id)
         if knowledge:
@@ -279,9 +279,37 @@ class GraphBuilder:
         return f"Part {part_id}"
 
     def _get_part_knowledge(self, part_id: str) -> Optional[dict]:
-        """获取零件完整知识"""
+        """获取零件完整知识（含几何/物理/商业属性）"""
         from src.kg.schema import get_part_knowledge
         return get_part_knowledge(part_id)
+
+    def _create_part_node_with_knowledge(self, part_id: str, name: str = "") -> GraphNode:
+        """创建带完整知识的零件节点（新增）"""
+        from src.kg.schema import get_part_knowledge, PartGeometry, PartPhysics, PartCommercial
+
+        knowledge = get_part_knowledge(part_id)
+
+        if knowledge:
+            return GraphNode(
+                node_type=NodeType.PART,
+                node_id=f"part_{part_id}",
+                name=name or knowledge["name"],
+                properties={
+                    "part_id": part_id,
+                    "category": knowledge.get("category", ""),
+                },
+                geometry=knowledge.get("geometry"),
+                physics=knowledge.get("physics"),
+                commercial=knowledge.get("commercial"),
+            )
+        else:
+            # 回退到基础创建
+            return GraphNode(
+                node_type=NodeType.PART,
+                node_id=f"part_{part_id}",
+                name=name or f"Part {part_id}",
+                properties={"part_id": part_id},
+            )
 
     def _extract_color(self, text: str, part_id: str) -> str:
         """提取零件颜色"""
@@ -731,11 +759,15 @@ def init_default_graph() -> dict:
     # 1. 从 Mock 说明书构建
     stats = build_from_mock_manual(set_id="10295")
 
-    # 2. 导入常见零件
+    # 2. 导入扩展零件数据库（1000+ 零件）
     try:
         from src.vision.part_recognizer import get_part_recognizer
         recognizer = get_part_recognizer()
         builder = GraphBuilder()
+
+        # 使用扩展数据库（含完整几何/物理/商业属性）
+        from src.kg.part_data_generator import get_extended_part_database
+        ext_db = get_extended_part_database()
 
         common_parts = [
             {"part_id": "3001", "name": "Brick 2x4", "category": "Brick"},
@@ -753,17 +785,29 @@ def init_default_graph() -> dict:
         ]
 
         for part in common_parts:
-            part_node = GraphNode(
-                node_type=NodeType.PART,
-                node_id=f"part_{part['part_id']}",
-                name=part["name"],
-                properties={
-                    "part_id": part["part_id"],
-                    "category": part["category"],
-                },
+            # 使用增强方法创建带完整知识的节点
+            part_node = builder._create_part_node_with_knowledge(
+                part["part_id"], part["name"]
             )
             builder.store.create_node(part_node)
             stats["nodes"] += 1
+
+        # 3. 导入扩展数据库中的额外零件（可选，用于扩展图谱）
+        import_count = 0
+        for part_id, knowledge in ext_db.items():
+            if part_id in [p["part_id"] for p in common_parts]:
+                continue  # 跳过已导入的
+
+            # 只导入前 100 个扩展零件（避免图谱过大）
+            if import_count >= 100:
+                break
+
+            part_node = builder._create_part_node_with_knowledge(part_id)
+            builder.store.create_node(part_node)
+            stats["nodes"] += 1
+            import_count += 1
+
+        print(f"[INFO] 导入了 {import_count} 个扩展零件")
 
         # 重新计算替代关系
         _auto_build_alternatives(builder, stats)

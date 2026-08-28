@@ -1,4 +1,4 @@
-"""图谱检索器
+"""图谱检索器（带缓存）
 
 基于多模态知识图谱的检索和推理。
 支持：
@@ -6,12 +6,14 @@
 - 多跳推理（替代零件链）
 - 路径查询（步骤→零件→替代）
 - 跨模态检索（文本→图片）
+- 缓存加速（重复查询命中缓存）
 """
 
 from typing import Optional
 
 from src.kg.schema import NodeType, RelationType
 from src.kg.graph_store import GraphStore, get_graph_store
+from src.agent.utils.cache import get_cache
 
 
 class GraphRetriever:
@@ -27,7 +29,7 @@ class GraphRetriever:
         limit: int = 5,
     ) -> list[dict]:
         """
-        查找零件的替代方案（多跳推理）。
+        查找零件的替代方案（多跳推理，带缓存）。
 
         Args:
             part_id: 零件编号
@@ -37,7 +39,19 @@ class GraphRetriever:
         Returns:
             替代零件列表
         """
-        return self.store.find_alternatives(part_id, limit=limit)
+        # 缓存查询
+        cache = get_cache()
+        cache_key = f"alts:{part_id}:{limit}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        result = self.store.find_alternatives(part_id, limit=limit)
+
+        # 缓存结果（替代关系很少变化，缓存 30 分钟）
+        cache.set(cache_key, result, ttl=1800)
+
+        return result
 
     def get_step_info(self, set_id: str, step_number: int) -> dict:
         """
@@ -74,7 +88,7 @@ class GraphRetriever:
 
     def get_part_info(self, part_id: str) -> dict:
         """
-        获取零件信息（包括颜色、类别、图片）。
+        获取零件信息（包括颜色、类别、图片，带缓存）。
 
         Args:
             part_id: 零件编号
@@ -82,6 +96,13 @@ class GraphRetriever:
         Returns:
             零件信息
         """
+        # 缓存查询
+        cache = get_cache()
+        cache_key = f"part_info:{part_id}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         node_id = f"part_{part_id}"
         node = self.store.get_node(node_id)
 
@@ -104,7 +125,7 @@ class GraphRetriever:
             if n.get("relation") in (RelationType.HAS_IMAGE.value, RelationType.CROSS_MODAL.value)
         ]
 
-        return {
+        result = {
             "found": True,
             "part": {
                 "part_id": part_id,
@@ -115,6 +136,11 @@ class GraphRetriever:
             "categories": categories,
             "images": images,
         }
+
+        # 缓存结果（零件信息很少变化，缓存 1 小时）
+        cache.set(cache_key, result, ttl=3600)
+
+        return result
 
     def find_path(
         self,

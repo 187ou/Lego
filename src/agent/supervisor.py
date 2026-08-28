@@ -5,6 +5,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent.state import AgentState
+from src.agent.utils.cache import get_cache
 
 SUPERVISOR_SYSTEM_PROMPT = """你是 LEGO-Mate 的调度中心（Supervisor）。
 
@@ -31,7 +32,7 @@ SUPERVISOR_SYSTEM_PROMPT = """你是 LEGO-Mate 的调度中心（Supervisor）�
 
 
 def supervisor_node(state: AgentState, llm: BaseChatModel) -> dict:
-    """Supervisor 节点：分析意图，决定路由"""
+    """Supervisor 节点：分析意图，决定路由（带缓存）"""
 
     # 获取最后一条用户消息
     last_user_msg = ""
@@ -47,7 +48,14 @@ def supervisor_node(state: AgentState, llm: BaseChatModel) -> dict:
     # 使用意图路由器做初步分类
     from src.agent.intent_router import classify_intent, IntentType, ResponseLevel
 
-    intent = classify_intent(last_user_msg, has_image)
+    # 缓存意图分类结果（相同消息短时间内不会变化）
+    cache = get_cache()
+    cache_key = f"intent:{hash(last_user_msg)}:{has_image}"
+    intent = cache.get(cache_key)
+
+    if intent is None:
+        intent = classify_intent(last_user_msg, has_image)
+        cache.set(cache_key, intent, ttl=300)  # 缓存 5 分钟
 
     # 根据意图类型决定路由
     next_agent = _route_by_intent(intent, last_user_msg, has_image)

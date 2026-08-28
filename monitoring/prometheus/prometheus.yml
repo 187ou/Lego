@@ -1,0 +1,40 @@
+# ============================================
+# Prometheus 配置
+# ============================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 告警规则
+rule_files:
+  - "alert_rules.yml"
+
+# 抓取配置
+scrape_configs:
+  # Prometheus 自身监控
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # LEGO-Mate 后端服务
+  - job_name: "lego-backend"
+    static_configs:
+      - targets: ["backend:8000"]
+    metrics_path: "/metrics"
+    scrape_interval: 10s
+
+  # Node Exporter (主机监控)
+  - job_name: "node-exporter"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # Redis 监控
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:6379"]
+
+  # Neo4j 监控
+  - job_name: "neo4j"
+    static_configs:
+      - targets: ["neo4j:7474"]
