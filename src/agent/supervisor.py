@@ -146,51 +146,142 @@ def aggregator_node(state: AgentState, llm: BaseChatModel) -> dict:
 
 
 def _build_summary_prompt(user_msg: str, agent_results: dict, state: AgentState) -> str:
-    """构建汇总 prompt"""
+    """构建汇总 prompt（增强版 - 结构化输出）"""
     parts = [f"用户消息：{user_msg}\n"]
 
     # 视觉识别结果
     vision = agent_results.get("vision", {})
     if vision:
-        parts.append(f"视觉识别结果：{vision}")
+        parts.append(_format_vision_result(vision))
 
     # 零件替代结果
     alternative = agent_results.get("alternative", {})
     if alternative:
-        alts = alternative.get("alternatives", [])
-        parts.append(f"零件替代方案：{alts}")
+        parts.append(_format_alternative_result(alternative))
 
     # 说明书结果
     manual = agent_results.get("manual", {})
     if manual:
-        parts.append(f"说明书内容：{manual.get('content', '')}")
+        parts.append(_format_manual_result(manual))
 
     # 验收结果
     verify = agent_results.get("verify", {})
     if verify:
-        parts.append(f"验收结果：{verify}")
+        parts.append(_format_verify_result(verify))
 
     # 心理安抚结果
     psychology = agent_results.get("psychology", {})
     if psychology:
-        parts.append(f"心理安抚：{psychology.get('encouragement', '')}")
+        parts.append(_format_psychology_result(psychology))
 
-    parts.append("\n请根据以上信息，生成一段友好、简洁的回复。")
+    parts.append("\n请根据以上信息，生成一段友好、简洁的回复。直接回复用户，不要提及内部处理过程。")
     return "\n".join(parts)
 
 
+def _format_vision_result(result: dict) -> str:
+    """格式化视觉识别结果"""
+    lines = ["🔍 视觉识别结果："]
+    parts_list = result.get("parts", [])
+    if parts_list:
+        for p in parts_list:
+            lines.append(f"  - {p.get('name', '未知')} x{p.get('quantity', 1)} ({p.get('color', '未知')})")
+    colors = result.get("colors", [])
+    if colors:
+        lines.append(f"  颜色：{', '.join(colors)}")
+    conf = result.get("confidence", 0)
+    lines.append(f"  置信度：{conf:.0%}")
+    if result.get("needs_retry"):
+        lines.append("  ⚠️ 建议重新拍摄")
+    return "\n".join(lines)
+
+
+def _format_alternative_result(result: dict) -> str:
+    """格式化零件替代结果"""
+    lines = ["🔧 零件替代方案："]
+    alts = result.get("alternatives", [])
+    if alts:
+        for i, alt in enumerate(alts[:5], 1):
+            conf = alt.get("confidence", 0)
+            emoji = "🟢" if conf >= 0.8 else "🟡" if conf >= 0.5 else "🔴"
+            lines.append(f"  {emoji} {alt.get('name', '未知')} ({alt.get('color', '未知')}) - 匹配度 {conf:.0%}")
+    else:
+        lines.append("  未找到替代方案")
+    # 图谱推理结果
+    reasoning = result.get("graph_reasoning", {})
+    if reasoning and reasoning.get("conclusion"):
+        lines.append(f"  🧠 推理：{reasoning['conclusion']}")
+    return "\n".join(lines)
+
+
+def _format_manual_result(result: dict) -> str:
+    """格式化说明书检索结果"""
+    lines = ["📖 说明书内容："]
+    step = result.get("step_number")
+    if step:
+        lines.append(f"  步骤 {step}")
+    content = result.get("content", "")
+    if content:
+        lines.append(f"  {content}")
+    page = result.get("page_number")
+    if page:
+        lines.append(f"  参考第 {page} 页")
+    return "\n".join(lines)
+
+
+def _format_verify_result(result: dict) -> str:
+    """格式化验收结果"""
+    lines = ["✅ 验收结果："]
+    verdict = result.get("verdict", "unknown")
+    emoji_map = {"pass": "✅ 通过", "review": "⚠️ 需复查", "fail": "❌ 不通过"}
+    lines.append(f"  判定：{emoji_map.get(verdict, verdict)}")
+    similarity = result.get("similarity", 0)
+    lines.append(f"  相似度：{similarity:.0%}")
+    details = result.get("details", "")
+    if details:
+        lines.append(f"  详情：{details}")
+    return "\n".join(lines)
+
+
+def _format_psychology_result(result: dict) -> str:
+    """格式化心理安抚结果"""
+    encouragement = result.get("encouragement", "")
+    if encouragement:
+        return f"💝 心理安抚：\n  {encouragement}"
+    return ""
+
+
 def _simple_aggregate(agent_results: dict) -> str:
-    """简单拼接各 Agent 结果（LLM 不可用时的降级方案）"""
+    """简单拼接各 Agent 结果（LLM 不可用时的降级方案，增强版）"""
     parts = []
 
-    for agent_name, result in agent_results.items():
-        if not result:
-            continue
-        if "response" in result:
-            parts.append(result["response"])
-        elif "content" in result:
-            parts.append(result["content"])
-        elif "encouragement" in result:
-            parts.append(result["encouragement"])
+    # 按优先级顺序处理各 Agent 结果
+    # 1. 心理安抚（最高优先级）
+    psychology = agent_results.get("psychology", {})
+    if psychology and psychology.get("encouragement"):
+        parts.append(psychology["encouragement"])
 
-    return "\n\n".join(parts) if parts else "抱歉，我暂时无法处理你的请求。"
+    # 2. 视觉识别
+    vision = agent_results.get("vision", {})
+    if vision:
+        parts.append(_format_vision_result(vision))
+
+    # 3. 零件替代
+    alternative = agent_results.get("alternative", {})
+    if alternative:
+        parts.append(_format_alternative_result(alternative))
+
+    # 4. 说明书
+    manual = agent_results.get("manual", {})
+    if manual:
+        parts.append(_format_manual_result(manual))
+
+    # 5. 验收
+    verify = agent_results.get("verify", {})
+    if verify:
+        parts.append(_format_verify_result(verify))
+
+    # 兜底回复
+    if not parts:
+        return "抱歉，我暂时无法处理你的请求。请稍后再试，或者换个方式描述你的问题。"
+
+    return "\n\n".join(parts)

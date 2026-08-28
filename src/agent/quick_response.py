@@ -11,6 +11,8 @@ from typing import Optional
 GREETING_PATTERNS = [
     r"^(你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|早安|午安|晚安)[\s!！.。]*$",
     r"^(在吗|在不在|有人吗|在么)[\s?？]*$",
+    r"^(man|yo|sup|bro|dude|guy|guys)[\s!！.。]*$",  # 新增：英文口语问候
+    r"^(ok|okay|好的|好|嗯|哦|了解|明白|知道了)[\s!！.。]*$",  # 新增：确认/肯定
 ]
 
 GREETING_RESPONSES = [

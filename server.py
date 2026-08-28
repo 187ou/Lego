@@ -42,7 +42,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.on_event("startup")
 async def startup_event():
-    """服务启动时初始化知识图谱 + Text2API 引擎"""
+    """服务启动时初始化知识图谱 + Text2API 引擎 + 预加载模型"""
     try:
         from src.kg.graph_builder import init_default_graph
         stats = init_default_graph()
@@ -57,6 +57,14 @@ async def startup_event():
         logger.info("Text2API 引擎初始化完成")
     except Exception as e:
         logger.warning(f"Text2API 引擎初始化失败: {e}")
+
+    # 预加载 Embedding 模型（避免首次请求卡顿）
+    try:
+        from src.rag.vector_store import get_vector_store
+        get_vector_store()
+        logger.info("Embedding 模型预加载完成")
+    except Exception as e:
+        logger.warning(f"Embedding 模型预加载失败（首次请求时会加载）: {e}")
 
 
 # ===== 数据模型 =====

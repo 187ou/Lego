@@ -120,6 +120,9 @@ ALTERNATIVE_PATTERNS = _compile_patterns([
     r"缺了(.*)怎么办",
     r"没有(.*)可以用(.*)",
     r"(.*)(的)?兼容(.*)",
+    r"(.*)有替代(吗)?",           # 新增: "有替代吗"
+    r"(.*)能替代(.*)",            # 新增: "能替代"
+    r"(.*)可以替换(.*)",          # 新增: "可以替换"
     r"find.*alternative.*for",
     r"substitute.*for",
     r"replacement.*for",
@@ -150,6 +153,8 @@ VERIFY_PATTERNS = _compile_patterns([
     r"(检查|看)(一?下)?(对吗|对么|对不对|正确吗|正确么)",
     r"(成品|作品|拼的)(对吗|对么|对不对|正确吗)",
     r"(有没有|是不是)(拼|搭|装)错",
+    r"(检查|验收).*(正确|对吗|是否正确)",  # 新增: "检查成品是否正确"
+    r"(帮)?我.*(正确|对吗|是否正确)",       # 新增: "帮我看是否正确"
     r"check.*(build|correct)",
     r"is.*(this|my).*correct",
     r"verify.*build",
@@ -193,6 +198,7 @@ REFERENCE_WORDS = frozenset(["这一步", "上一步", "下一步", "这步", "�
 _L1_GREETING = _compile_patterns([
     r"^(你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|早安|午安|晚安)[\s!！.。]*$",
     r"^(在吗|在不在|有人吗|在么)[\s?？]*$",
+    r"^(man|yo|sup|bro|dude)[\s!！.。]*$",  # 英文口语问候
 ])
 
 _L1_THANKS = _compile_patterns([

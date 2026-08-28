@@ -6,6 +6,7 @@ dist/
 build/
 .venv/
 venv/
+LEGO-Mate.md
 
 # 环境变量
 .env
