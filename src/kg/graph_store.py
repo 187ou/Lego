@@ -190,6 +190,74 @@ class Neo4jGraphStore(GraphStore):
             print(f"[ERROR] 查找替代失败: {e}")
             return []
 
+    def find_incompatible_parts(self, part_id: str) -> list[dict]:
+        """查找不兼容零件（新增）"""
+        if not self._available:
+            return []
+
+        try:
+            node_id = f"part_{part_id}" if not part_id.startswith("part_") else part_id
+            query = """
+                MATCH (p {node_id: $node_id})-[:INCOMPATIBLE_WITH]-(incompat)
+                RETURN incompat.node_id as part_id, incompat.name as name
+                """
+            results = self._run_query(query, node_id=node_id)
+            for r in results:
+                r["part_id"] = r["part_id"].replace("part_", "")
+            return results
+        except Exception as e:
+            print(f"[ERROR] 查找不兼容零件失败: {e}")
+            return []
+
+    def find_dependent_parts(self, part_id: str) -> list[dict]:
+        """查找依赖零件（新增）"""
+        if not self._available:
+            return []
+
+        try:
+            node_id = f"part_{part_id}" if not part_id.startswith("part_") else part_id
+            query = """
+                MATCH (p {node_id: $node_id})-[:DEPENDS_ON]-(dep)
+                RETURN dep.node_id as part_id, dep.name as name
+                """
+            results = self._run_query(query, node_id=node_id)
+            for r in results:
+                r["part_id"] = r["part_id"].replace("part_", "")
+            return results
+        except Exception as e:
+            print(f"[ERROR] 查找依赖零件失败: {e}")
+            return []
+
+    def get_sub_assemblies(self, set_id: str) -> list[dict]:
+        """获取套装的子装配（新增）"""
+        if not self._available:
+            return []
+
+        try:
+            query = """
+                MATCH (s:Set {node_id: $set_id})-[:CONTAINS]->(sa:SubAssembly)
+                RETURN sa.node_id as assembly_id, sa.name as name
+                """
+            return self._run_query(query, set_id=f"set_{set_id}")
+        except Exception as e:
+            print(f"[ERROR] 获取子装配失败: {e}")
+            return []
+
+    def get_assembly_parts(self, assembly_id: str) -> list[dict]:
+        """获取子装配的零件（新增）"""
+        if not self._available:
+            return []
+
+        try:
+            query = """
+                MATCH (sa:SubAssembly {node_id: $assembly_id})-[:HAS_PART]->(p:Part)
+                RETURN p.node_id as part_id, p.name as name
+                """
+            return self._run_query(query, assembly_id=assembly_id)
+        except Exception as e:
+            print(f"[ERROR] 获取子装配零件失败: {e}")
+            return []
+
     def get_stats(self) -> dict:
         """获取统计信息"""
         if not self._available:
@@ -276,19 +344,21 @@ class MockGraphStore(GraphStore):
 
     def find_alternatives(self, part_id: str, limit: int = 5, max_depth: int = 3) -> list[dict]:
         """
-        查找替代零件（BFS，带深度限制）。
+        查找替代零件（BFS + 多维度评分）。
 
         Args:
             part_id: 零件编号
             limit: 返回数量
             max_depth: 最大搜索深度（跳数）
         """
+        from src.kg.schema import calc_part_compatibility
+
         node_id = f"part_{part_id}"
         visited = {node_id}
         queue = [(node_id, 0)]
-        results = []
+        candidates = []
 
-        while queue and len(results) < limit:
+        while queue and len(candidates) < limit * 3:  # 多取一些用于排序
             current_id, distance = queue.pop(0)
 
             # 深度限制
@@ -307,14 +377,105 @@ class MockGraphStore(GraphStore):
                         visited.add(next_id)
                         node = self._nodes.get(next_id)
                         if node:
-                            results.append({
-                                "part_id": node.node_id.replace("part_", ""),
+                            # 计算多维度兼容性得分
+                            alt_part_id = node.node_id.replace("part_", "")
+                            compatibility = calc_part_compatibility(part_id, alt_part_id)
+
+                            candidates.append({
+                                "part_id": alt_part_id,
                                 "name": node.name,
                                 "distance": distance + 1,
+                                "compatibility": compatibility,
+                                "confidence": rel.confidence,
+                                # 综合得分 = 兼容性 * 关系置信度 / 距离惩罚
+                                "score": compatibility * rel.confidence / (distance + 1),
                             })
                         queue.append((next_id, distance + 1))
 
-        return results[:limit]
+        # 按综合得分排序
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates[:limit]
+
+    def find_incompatible_parts(self, part_id: str) -> list[dict]:
+        """查找不兼容零件（新增）"""
+        node_id = f"part_{part_id}"
+        results = []
+
+        for rel in self._relations:
+            if rel.relation_type == RelationType.INCOMPATIBLE_WITH:
+                if rel.source_id == node_id:
+                    target = self._nodes.get(rel.target_id)
+                    if target:
+                        results.append({
+                            "part_id": target.node_id.replace("part_", ""),
+                            "name": target.name,
+                        })
+                elif rel.target_id == node_id:
+                    source = self._nodes.get(rel.source_id)
+                    if source:
+                        results.append({
+                            "part_id": source.node_id.replace("part_", ""),
+                            "name": source.name,
+                        })
+
+        return results
+
+    def find_dependent_parts(self, part_id: str) -> list[dict]:
+        """查找依赖零件（新增）"""
+        node_id = f"part_{part_id}"
+        results = []
+
+        for rel in self._relations:
+            if rel.relation_type == RelationType.DEPENDS_ON:
+                if rel.source_id == node_id:
+                    target = self._nodes.get(rel.target_id)
+                    if target:
+                        results.append({
+                            "part_id": target.node_id.replace("part_", ""),
+                            "name": target.name,
+                        })
+                elif rel.target_id == node_id:
+                    source = self._nodes.get(rel.source_id)
+                    if source:
+                        results.append({
+                            "part_id": source.node_id.replace("part_", ""),
+                            "name": source.name,
+                        })
+
+        return results
+
+    def get_sub_assemblies(self, set_id: str) -> list[dict]:
+        """获取套装的子装配（新增）"""
+        set_node_id = f"set_{set_id}"
+        results = []
+
+        for rel in self._relations:
+            if rel.relation_type == RelationType.CONTAINS:
+                if rel.source_id == set_node_id:
+                    target = self._nodes.get(rel.target_id)
+                    if target and target.node_type == NodeType.SUB_ASSEMBLY:
+                        results.append({
+                            "assembly_id": target.node_id,
+                            "name": target.name,
+                        })
+
+        return results
+
+    def get_assembly_parts(self, assembly_id: str) -> list[dict]:
+        """获取子装配的零件（新增）"""
+        results = []
+
+        for rel in self._relations:
+            if rel.relation_type == RelationType.HAS_PART:
+                if rel.source_id == assembly_id:
+                    target = self._nodes.get(rel.target_id)
+                    if target:
+                        results.append({
+                            "part_id": target.node_id.replace("part_", ""),
+                            "name": target.name,
+                        })
+
+        return results
 
     def get_stats(self) -> dict:
         node_types = {}

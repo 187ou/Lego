@@ -271,58 +271,17 @@ class GraphBuilder:
         return 1
 
     def _lookup_part_name(self, part_id: str) -> str:
-        """
-        查找零件名称（扩展版）。
+        """查找零件名称（从知识库获取）"""
+        from src.kg.schema import get_part_knowledge
+        knowledge = get_part_knowledge(part_id)
+        if knowledge:
+            return knowledge["name"]
+        return f"Part {part_id}"
 
-        支持更多零件类型，包括 Brick/Plate/Slope/Tile 等。
-        """
-        # 常见零件名称映射（扩展版）
-        common_names = {
-            # Brick 系列
-            "3001": "Brick 2x4",
-            "3002": "Brick 2x3",
-            "3003": "Brick 2x2",
-            "3004": "Brick 1x2",
-            "3005": "Brick 1x1",
-            "3008": "Brick 1x8",
-            "3009": "Brick 1x6",
-            "3010": "Brick 1x4",
-            "3622": "Brick 1x3",
-            # Plate 系列
-            "3020": "Plate 2x4",
-            "3021": "Plate 2x3",
-            "3022": "Plate 2x2",
-            "3023": "Plate 1x2",
-            "3024": "Plate 1x1",
-            "3031": "Plate 4x4",
-            "3034": "Plate 2x8",
-            # Tile 系列
-            "3069": "Tile 1x2",
-            "3070": "Tile 1x1",
-            "3068": "Tile 2x2",
-            # Slope 系列
-            "3039": "Slope 45° 2x2",
-            "3040": "Slope 45° 2x1",
-            "3048": "Slope 45° 2x1 Double",
-            # Technic 系列
-            "3700": "Technic Brick 1x2",
-            "3701": "Technic Brick 1x4",
-            "3713": "Technic Bush",
-            "4019": "Technic Pin",
-            # 其他
-            "3006": "Brick 2x10",
-            "3007": "Brick 2x8",
-            "3460": "Plate 1x8",
-            "3795": "Plate 2x6",
-            "3036": "Plate 6x8",
-            "3035": "Plate 4x6",
-            "3032": "Plate 4x4",
-            "3030": "Plate 4x10",
-            "3832": "Plate 2x10",
-            "3659": "Brick 1x1 with Stud",
-            "30414": "Brick 1x4 with 4 Studs",
-        }
-        return common_names.get(part_id, f"Part {part_id}")
+    def _get_part_knowledge(self, part_id: str) -> Optional[dict]:
+        """获取零件完整知识"""
+        from src.kg.schema import get_part_knowledge
+        return get_part_knowledge(part_id)
 
     def _extract_color(self, text: str, part_id: str) -> str:
         """提取零件颜色"""
@@ -346,6 +305,69 @@ class GraphBuilder:
             confidence=confidence,
         )
         self.store.create_relation(relation)
+
+    def add_part_incompatible(
+        self,
+        part_id_a: str,
+        part_id_b: str,
+    ):
+        """添加零件不兼容关系（新增）"""
+        relation = GraphRelation(
+            relation_type=RelationType.INCOMPATIBLE_WITH,
+            source_id=f"part_{part_id_a}",
+            target_id=f"part_{part_id_b}",
+        )
+        self.store.create_relation(relation)
+
+    def add_part_dependency(
+        self,
+        part_id_a: str,
+        part_id_b: str,
+    ):
+        """添加零件依赖关系（新增）"""
+        relation = GraphRelation(
+            relation_type=RelationType.DEPENDS_ON,
+            source_id=f"part_{part_id_a}",
+            target_id=f"part_{part_id_b}",
+        )
+        self.store.create_relation(relation)
+
+    def create_sub_assembly(
+        self,
+        assembly_id: str,
+        name: str,
+        set_id: str,
+        part_ids: list[str],
+    ):
+        """创建子装配（新增）"""
+        # 创建子装配节点
+        assembly_node = GraphNode(
+            node_type=NodeType.SUB_ASSEMBLY,
+            node_id=f"assembly_{assembly_id}",
+            name=name,
+            properties={
+                "assembly_id": assembly_id,
+                "set_id": set_id,
+            },
+        )
+        self.store.create_node(assembly_node)
+
+        # 创建套装 → 子装配关系
+        contains_rel = GraphRelation(
+            relation_type=RelationType.CONTAINS,
+            source_id=f"set_{set_id}",
+            target_id=f"assembly_{assembly_id}",
+        )
+        self.store.create_relation(contains_rel)
+
+        # 创建子装配 → 零件关系
+        for part_id in part_ids:
+            has_part_rel = GraphRelation(
+                relation_type=RelationType.HAS_PART,
+                source_id=f"assembly_{assembly_id}",
+                target_id=f"part_{part_id}",
+            )
+            self.store.create_relation(has_part_rel)
 
     def add_part_image(
         self,
@@ -614,16 +636,17 @@ def build_from_mock_manual(set_id: str = "10295") -> dict:
 
 def _auto_build_alternatives(builder: GraphBuilder, stats: dict):
     """
-    自动计算零件替代关系。
+    自动计算零件替代关系（增强版 - 多维度评分）。
 
-    基于图谱中已有的 Part 节点和 _lookup_part_name 推断类型与尺寸。
-    不使用硬编码零件表，只处理图谱中实际存在的零件。
-
-    规则（基于 LEGO 几何兼容性）：
-    - 同类型 + 同尺寸 → confidence=0.95（完全可替代）
-    - 同类型 + 尺寸差一级 → confidence=0.6（可能替代，但长度不同）
-    - 不同类型 → 不建立替代关系（高度不同，无法直接替代）
+    使用 calc_part_compatibility 计算多维度兼容性得分：
+    - 尺寸相似度 (30%)
+    - 凸点兼容性 (25%)
+    - 连接类型兼容性 (20%)
+    - 类别匹配 (15%)
+    - 高度兼容性 (10%)
     """
+    from src.kg.schema import calc_part_compatibility
+
     # 从图谱中获取所有 Part 节点的 part_id
     store = builder.store
     graph_stats = store.get_stats()
@@ -635,63 +658,21 @@ def _auto_build_alternatives(builder: GraphBuilder, stats: dict):
     if len(part_ids) < 2:
         return
 
-    # 零件类型查找表（用于分类）
-    type_prefixes = {
-        "Brick": ["3001", "3002", "3003", "3004", "3005", "3008", "3009", "3010", "3622",
-                    "3006", "3007"],
-        "Plate": ["3020", "3021", "3022", "3023", "3024", "3031", "3034", "3795", "3032"],
-        "Tile": ["3069", "3070", "3068"],
-        "Slope": ["3039", "3040", "3048", "30414"],
-    }
-
-    def _get_type(part_id: str) -> str:
-        for type_name, prefixes in type_prefixes.items():
-            if part_id in prefixes:
-                return type_name
-        return "Other"
-
-    def _get_size(part_id: str) -> tuple[int, int] | None:
-        """从零件名称推断尺寸（如 'Brick 2x4' → (2, 4)）"""
-        import re
-        name = builder._lookup_part_name(part_id)
-        match = re.search(r"(\d+)\s*[x×]\s*(\d+)", name)
-        if match:
-            return (int(match.group(1)), int(match.group(2)))
-        return None
-
     for i, part_id_a in enumerate(part_ids):
-        type_a = _get_type(part_id_a)
-        size_a = _get_size(part_id_a)
-        if size_a is None:
-            continue
-
         for part_id_b in part_ids[i + 1:]:
-            type_b = _get_type(part_id_b)
-            size_b = _get_size(part_id_b)
-            if size_b is None:
-                continue
+            # 使用多维度兼容性计算
+            compatibility = calc_part_compatibility(part_id_a, part_id_b)
 
-            # 不同类型不建立替代关系（高度不同，无法直接替代）
-            if type_a != type_b:
-                continue
-
-            if size_a == size_b:
-                confidence = 0.95
-            elif (abs(size_a[0] - size_b[0]) <= 1 and abs(size_a[1] - size_b[1]) <= 1
-                  and (size_a[0] == size_b[0] or size_a[1] == size_b[1])):
-                # 只有一维相同（如 2x4 和 2x3），另一维差1
-                confidence = 0.6
-            else:
-                continue
-
-            rel = GraphRelation(
-                relation_type=RelationType.CAN_REPLACE,
-                source_id=f"part_{part_id_a}",
-                target_id=f"part_{part_id_b}",
-                confidence=confidence,
-            )
-            store.create_relation(rel)
-            stats["relations"] += 1
+            # 兼容性 > 0.5 才建立替代关系
+            if compatibility >= 0.5:
+                rel = GraphRelation(
+                    relation_type=RelationType.CAN_REPLACE,
+                    source_id=f"part_{part_id_a}",
+                    target_id=f"part_{part_id_b}",
+                    confidence=compatibility,
+                )
+                store.create_relation(rel)
+                stats["relations"] += 1
 
 
 def _get_part_ids_from_store(store) -> list[str]:
